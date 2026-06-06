@@ -1,9 +1,6 @@
 use serde::{Deserialize, Serialize};
-use serialport::{
-    self, FlowControl as SPFlowControl, Parity, SerialPortInfo, StopBits, TTYPort,
-};
+use serialport::{self, FlowControl as SPFlowControl, Parity, SerialPortInfo, StopBits};
 use std::io::{Read, Write};
-use std::os::unix::io::AsRawFd;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -13,6 +10,11 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
 use super::encoding::{self, Encoding};
+
+#[cfg(unix)]
+type NativePort = serialport::TTYPort;
+#[cfg(windows)]
+type NativePort = serialport::COMPort;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortConfig {
@@ -33,7 +35,7 @@ pub struct ReceivedData {
 }
 
 pub struct SerialManager {
-    port: Option<TTYPort>,
+    port: Option<NativePort>,
     receiver_handle: Option<JoinHandle<()>>,
     stop_flag: Option<Arc<AtomicBool>>,
 }
@@ -91,7 +93,7 @@ impl SerialManager {
             .flow_control(flow_control)
             .timeout(Duration::from_millis(100));
 
-        let port = TTYPort::open(&builder).map_err(|e| format!("打开串口失败: {}", e))?;
+        let port = NativePort::open(&builder).map_err(|e| format!("打开串口失败: {}", e))?;
 
         self.port = Some(port);
 
@@ -107,9 +109,13 @@ impl SerialManager {
         let mut reader = port
             .try_clone_native()
             .map_err(|e| format!("克隆串口失败: {}", e))?;
-        let reader_fd = reader.as_raw_fd();
-        // 设置非阻塞模式，避免 macOS 串口驱动 poll() 假阳性后 read() 永久阻塞
+        // macOS 串口驱动 poll() 会假阳性返回可读，随后 read() 永久阻塞。
+        // 设置 O_NONBLOCK 让 read() 在无数据时返回 WouldBlock 而非阻塞。
+        // Linux 不需要（行为正确），Windows 没有 fcntl/O_NONBLOCK。
+        #[cfg(target_os = "macos")]
         unsafe {
+            use std::os::unix::io::AsRawFd;
+            let reader_fd = reader.as_raw_fd();
             let flags = libc::fcntl(reader_fd, libc::F_GETFL, 0);
             libc::fcntl(reader_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
         }
