@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
-use serialport::{self, FlowControl as SPFlowControl, Parity, SerialPortInfo, StopBits};
+use serialport::{
+    self, ClearBuffer, FlowControl as SPFlowControl, Parity, SerialPort, SerialPortInfo, StopBits,
+};
 use std::io::{Read, Write};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -11,10 +13,40 @@ use tauri::{AppHandle, Emitter};
 
 use super::encoding::{self, Encoding};
 
+const READ_POLL_TIMEOUT: Duration = Duration::from_millis(100);
+const WRITE_TIMEOUT: Duration = Duration::from_millis(100);
+
 #[cfg(unix)]
 type NativePort = serialport::TTYPort;
 #[cfg(windows)]
 type NativePort = serialport::COMPort;
+
+#[cfg(unix)]
+fn configure_nonblocking(port: &NativePort) -> Result<(), String> {
+    use std::os::unix::io::AsRawFd;
+
+    let fd = port.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL, 0) };
+    if flags < 0 {
+        return Err(format!(
+            "读取串口文件状态失败: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(format!(
+            "设置串口非阻塞模式失败: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+
+    Ok(())
+}
+
+fn assert_terminal_ready(port: &mut NativePort) {
+    let _ = port.write_data_terminal_ready(true);
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortConfig {
@@ -91,9 +123,16 @@ impl SerialManager {
             .stop_bits(stop_bits)
             .parity(parity)
             .flow_control(flow_control)
-            .timeout(Duration::from_millis(100));
+            .timeout(WRITE_TIMEOUT);
 
-        let port = NativePort::open(&builder).map_err(|e| format!("打开串口失败: {}", e))?;
+        let mut port = NativePort::open(&builder).map_err(|e| format!("打开串口失败: {}", e))?;
+
+        #[cfg(unix)]
+        // serialport opens POSIX TTYs as blocking fds; keep them nonblocking so
+        // driver/poll edge cases cannot stall Tauri commands while the manager lock is held.
+        configure_nonblocking(&port)?;
+
+        assert_terminal_ready(&mut port);
 
         self.port = Some(port);
 
@@ -109,16 +148,9 @@ impl SerialManager {
         let mut reader = port
             .try_clone_native()
             .map_err(|e| format!("克隆串口失败: {}", e))?;
-        // macOS 串口驱动 poll() 会假阳性返回可读，随后 read() 永久阻塞。
-        // 设置 O_NONBLOCK 让 read() 在无数据时返回 WouldBlock 而非阻塞。
-        // Linux 不需要（行为正确），Windows 没有 fcntl/O_NONBLOCK。
-        #[cfg(target_os = "macos")]
-        unsafe {
-            use std::os::unix::io::AsRawFd;
-            let reader_fd = reader.as_raw_fd();
-            let flags = libc::fcntl(reader_fd, libc::F_GETFL, 0);
-            libc::fcntl(reader_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-        }
+        reader
+            .set_timeout(READ_POLL_TIMEOUT)
+            .map_err(|e| format!("设置接收超时失败: {}", e))?;
         let stop_flag = Arc::new(AtomicBool::new(false));
         self.stop_flag = Some(Arc::clone(&stop_flag));
 
@@ -159,18 +191,37 @@ impl SerialManager {
 
     pub fn send(&mut self, data: &[u8]) -> Result<usize, String> {
         let port = self.port.as_mut().ok_or("串口未打开")?;
-        port.write(data).map_err(|e| format!("发送失败: {}", e))
+
+        let mut written = 0;
+
+        while written < data.len() {
+            match port.write(&data[written..]) {
+                Ok(0) => {
+                    return Err("发送失败: 写入 0 字节".to_string());
+                }
+                Ok(n) => {
+                    written += n;
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => {
+                    return Err(format!("发送失败: {}", e));
+                }
+            }
+        }
+
+        Ok(written)
     }
 
     pub fn close(&mut self) -> Result<(), String> {
         if let Some(stop_flag) = self.stop_flag.take() {
             stop_flag.store(true, Ordering::Relaxed);
         }
+        if let Some(port) = self.port.as_mut() {
+            let _ = port.clear(ClearBuffer::All);
+        }
         self.port = None;
         if let Some(handle) = self.receiver_handle.take() {
-            handle
-                .join()
-                .map_err(|_| "接收线程关闭失败".to_string())?;
+            handle.join().map_err(|_| "接收线程关闭失败".to_string())?;
         }
         Ok(())
     }
@@ -183,6 +234,120 @@ impl SerialManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn fd_is_nonblocking(fd: std::os::unix::io::RawFd) -> bool {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL, 0) };
+        flags & libc::O_NONBLOCK != 0
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_configures_unix_tty_as_nonblocking() {
+        use serialport::SerialPort;
+        use std::os::unix::io::AsRawFd;
+
+        let (_master, slave) = serialport::TTYPort::pair().unwrap();
+        let port_name = slave.name().unwrap();
+        drop(slave);
+
+        let mut manager = SerialManager::new();
+        manager
+            .open(&PortConfig {
+                port_name,
+                baud_rate: 115200,
+                data_bits: 8,
+                stop_bits: "1".to_string(),
+                parity: "none".to_string(),
+                flow_control: "none".to_string(),
+            })
+            .unwrap();
+
+        let fd = manager.port.as_ref().unwrap().as_raw_fd();
+        assert!(fd_is_nonblocking(fd));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn send_waits_for_temporarily_full_unix_output_queue() {
+        use serialport::SerialPort;
+        use std::io::{Read, Write};
+
+        let (mut master, slave) = serialport::TTYPort::pair().unwrap();
+        let port_name = slave.name().unwrap();
+        drop(slave);
+
+        let mut manager = SerialManager::new();
+        manager
+            .open(&PortConfig {
+                port_name,
+                baud_rate: 115200,
+                data_bits: 8,
+                stop_bits: "1".to_string(),
+                parity: "none".to_string(),
+                flow_control: "none".to_string(),
+            })
+            .unwrap();
+
+        let filler = vec![0x55; 4096];
+        let mut saturated = false;
+        for _ in 0..256 {
+            match manager.port.as_mut().unwrap().write(&filler) {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                    saturated = true;
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    saturated = true;
+                    break;
+                }
+                Err(e) => panic!("unexpected write error while filling pty: {e}"),
+            }
+        }
+        assert!(saturated, "pty output queue did not fill during test setup");
+
+        let (release_master, wait_for_send) = std::sync::mpsc::channel();
+        let drain_handle = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            let mut buffer = vec![0u8; 8192];
+            let _ = master.read(&mut buffer);
+            let _ = wait_for_send.recv_timeout(Duration::from_secs(1));
+        });
+
+        let sent = manager.send(b"x");
+        let _ = release_master.send(());
+
+        drain_handle.join().unwrap();
+        assert_eq!(sent.unwrap(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_keeps_write_timeout_low_for_responsive_sends() {
+        use serialport::SerialPort;
+
+        let (_master, slave) = serialport::TTYPort::pair().unwrap();
+        let port_name = slave.name().unwrap();
+        drop(slave);
+
+        let mut manager = SerialManager::new();
+        manager
+            .open(&PortConfig {
+                port_name,
+                baud_rate: 115200,
+                data_bits: 8,
+                stop_bits: "1".to_string(),
+                parity: "none".to_string(),
+                flow_control: "none".to_string(),
+            })
+            .unwrap();
+
+        assert_eq!(
+            manager.port.as_ref().unwrap().timeout(),
+            Duration::from_millis(100)
+        );
+    }
 
     #[test]
     fn close_sets_stop_flag_and_joins_thread() {
