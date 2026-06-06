@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use serialport::{
-    self, FlowControl as SPFlowControl, Parity, SerialPort, SerialPortInfo, StopBits,
+    self, FlowControl as SPFlowControl, Parity, SerialPortInfo, StopBits, TTYPort,
 };
+use std::io::{Read, Write};
+use std::os::unix::io::AsRawFd;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -31,7 +33,7 @@ pub struct ReceivedData {
 }
 
 pub struct SerialManager {
-    port: Option<Box<dyn SerialPort>>,
+    port: Option<TTYPort>,
     receiver_handle: Option<JoinHandle<()>>,
     stop_flag: Option<Arc<AtomicBool>>,
 }
@@ -82,14 +84,14 @@ impl SerialManager {
             _ => return Err("无效的流控方式".to_string()),
         };
 
-        let port = serialport::new(&config.port_name, config.baud_rate)
+        let builder = serialport::new(&config.port_name, config.baud_rate)
             .data_bits(data_bits)
             .stop_bits(stop_bits)
             .parity(parity)
             .flow_control(flow_control)
-            .timeout(Duration::from_millis(100))
-            .open()
-            .map_err(|e| format!("打开串口失败: {}", e))?;
+            .timeout(Duration::from_millis(100));
+
+        let port = TTYPort::open(&builder).map_err(|e| format!("打开串口失败: {}", e))?;
 
         self.port = Some(port);
 
@@ -103,8 +105,14 @@ impl SerialManager {
     ) -> Result<(), String> {
         let port = self.port.as_ref().ok_or("串口未打开")?;
         let mut reader = port
-            .try_clone()
+            .try_clone_native()
             .map_err(|e| format!("克隆串口失败: {}", e))?;
+        let reader_fd = reader.as_raw_fd();
+        // 设置非阻塞模式，避免 macOS 串口驱动 poll() 假阳性后 read() 永久阻塞
+        unsafe {
+            let flags = libc::fcntl(reader_fd, libc::F_GETFL, 0);
+            libc::fcntl(reader_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
         let stop_flag = Arc::new(AtomicBool::new(false));
         self.stop_flag = Some(Arc::clone(&stop_flag));
 
@@ -130,6 +138,7 @@ impl SerialManager {
                     }
                     Ok(_) => {}
                     Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {}
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
                     Err(e) => {
                         let _ = app_handle.emit("serial-error", format!("读取错误: {}", e));
                         break;
@@ -153,7 +162,9 @@ impl SerialManager {
         }
         self.port = None;
         if let Some(handle) = self.receiver_handle.take() {
-            handle.join().map_err(|_| "接收线程关闭失败".to_string())?;
+            handle
+                .join()
+                .map_err(|_| "接收线程关闭失败".to_string())?;
         }
         Ok(())
     }
@@ -168,7 +179,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn close_waits_for_receiver_thread_to_exit_before_returning() {
+    fn close_sets_stop_flag_and_joins_thread() {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let finished = Arc::new(AtomicBool::new(false));
         let thread_stop_flag = Arc::clone(&stop_flag);
@@ -177,7 +188,6 @@ mod tests {
             while !thread_stop_flag.load(Ordering::Relaxed) {
                 thread::sleep(Duration::from_millis(1));
             }
-            thread::sleep(Duration::from_millis(20));
             thread_finished.store(true, Ordering::Relaxed);
         });
         let mut manager = SerialManager {
