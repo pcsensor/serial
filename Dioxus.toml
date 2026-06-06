@@ -1,0 +1,10 @@
+[application]
+name = "serial-debugger"
+
+[web.app]
+title = "串口调试助手"
+
+[web.watcher]
+reload_html = true
+
+[web.resource.dev]
