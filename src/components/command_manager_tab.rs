@@ -12,6 +12,10 @@ pub fn CommandManagerTab() -> Element {
     let mut edit_id = use_signal(|| Option::<String>::None);
 
     use_effect(move || {
+        if !claim_once(&mut state.preset_commands_loaded.write()) {
+            return;
+        }
+
         spawn(async move {
             match api::load_preset_commands().await {
                 Ok(cmds) => {
@@ -47,13 +51,7 @@ pub fn CommandManagerTab() -> Element {
                     }
                 }
                 None => {
-                    let id = format!(
-                        "{:x}",
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_nanos()
-                    );
+                    let id = new_preset_command_id();
                     commands.push(PresetCommand {
                         id,
                         name,

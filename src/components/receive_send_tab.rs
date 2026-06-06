@@ -2,6 +2,8 @@ use crate::services::api;
 use crate::services::store::*;
 use dioxus::prelude::*;
 
+const RECEIVE_LOG_CONTAINER_ID: &str = "receive-log-container";
+
 #[component]
 pub fn ReceiveSendTab() -> Element {
     let mut state: AppState = use_context();
@@ -38,6 +40,17 @@ pub fn ReceiveSendTab() -> Element {
                 }
             },
         );
+    });
+
+    use_effect(move || {
+        let message_count = state.received_messages.read().len();
+        let auto_scroll = *state.auto_scroll.read();
+        if should_scroll_receive_log(auto_scroll, message_count) {
+            spawn(async move {
+                gloo_timers::future::sleep(std::time::Duration::from_millis(0)).await;
+                scroll_receive_log_to_bottom(RECEIVE_LOG_CONTAINER_ID);
+            });
+        }
     });
 
     let send = move |_| {
@@ -109,6 +122,7 @@ pub fn ReceiveSendTab() -> Element {
     let messages = state.received_messages.read().clone();
     let encoding = state.send_encoding.read().clone();
     let line_ending = state.send_line_ending.read().clone();
+    let auto_scroll = *state.auto_scroll.read();
 
     rsx! {
         div {
@@ -118,6 +132,7 @@ pub fn ReceiveSendTab() -> Element {
                 class: "glass-card",
                 style: "flex:1;display:flex;flex-direction:column;overflow:hidden;padding:10px;",
                 div {
+                    id: RECEIVE_LOG_CONTAINER_ID,
                     style: "flex:1;overflow-y:auto;font-family:'Cascadia Code','Fira Code',monospace;font-size:12px;line-height:1.6;",
                     for (index, msg) in messages.iter().enumerate() {
                         {
@@ -141,7 +156,19 @@ pub fn ReceiveSendTab() -> Element {
                     }
                 }
                 div {
-                    style: "display:flex;gap:6px;margin-top:8px;",
+                    style: "display:flex;align-items:center;gap:8px;margin-top:8px;",
+                    label {
+                        style: "display:flex;align-items:center;gap:4px;font-size:11px;color:#888;",
+                        input {
+                            r#type: "checkbox",
+                            checked: auto_scroll,
+                            onchange: move |e| {
+                                *state.auto_scroll.write() = e.checked();
+                            },
+                        }
+                        "自动滚动"
+                    }
+                    div { style: "flex:1;" }
                     button { class: "btn btn-secondary", onclick: clear, "清空" }
                     button { class: "btn btn-secondary", onclick: export, "导出" }
                 }
@@ -273,3 +300,39 @@ pub fn ReceiveSendTab() -> Element {
         }
     }
 }
+
+#[cfg(target_arch = "wasm32")]
+fn scroll_receive_log_to_bottom(element_id: &str) {
+    use wasm_bindgen::{JsCast, JsValue};
+
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Ok(document) = js_sys::Reflect::get(&window, &JsValue::from_str("document")) else {
+        return;
+    };
+    let Some(get_element_by_id) =
+        js_sys::Reflect::get(&document, &JsValue::from_str("getElementById"))
+            .ok()
+            .and_then(|value| value.dyn_into::<js_sys::Function>().ok())
+    else {
+        return;
+    };
+
+    let args = js_sys::Array::new();
+    args.push(&JsValue::from_str(element_id));
+    let Ok(element) = get_element_by_id.apply(&document, &args) else {
+        return;
+    };
+    if element.is_null() || element.is_undefined() {
+        return;
+    }
+    let Ok(scroll_height) = js_sys::Reflect::get(&element, &JsValue::from_str("scrollHeight"))
+    else {
+        return;
+    };
+    let _ = js_sys::Reflect::set(&element, &JsValue::from_str("scrollTop"), &scroll_height);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn scroll_receive_log_to_bottom(_element_id: &str) {}

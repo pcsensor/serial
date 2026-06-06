@@ -1,6 +1,9 @@
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
+#[cfg(not(target_arch = "wasm32"))]
+use chrono::Timelike;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PortConfig {
     pub port_name: String,
@@ -86,13 +89,17 @@ pub fn received_message_render_key(index: usize, message: &ReceivedMessage) -> S
     format!("{}-{}", index, message.timestamp)
 }
 
-pub fn claim_serial_data_listener_registration(registered: &mut bool) -> bool {
-    if *registered {
+pub fn claim_once(claimed: &mut bool) -> bool {
+    if *claimed {
         false
     } else {
-        *registered = true;
+        *claimed = true;
         true
     }
+}
+
+pub fn claim_serial_data_listener_registration(registered: &mut bool) -> bool {
+    claim_once(registered)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -240,8 +247,48 @@ pub fn visualize_serial_data(data: &str) -> String {
         .collect()
 }
 
+pub fn format_message_timestamp(hour: u32, minute: u32, second: u32, millisecond: u32) -> String {
+    format!("{hour:02}:{minute:02}:{second:02}.{millisecond:03}")
+}
+
+#[cfg(target_arch = "wasm32")]
 pub fn current_message_timestamp() -> String {
-    chrono::Local::now().format("%H:%M:%S%.3f").to_string()
+    let date = js_sys::Date::new_0();
+    format_message_timestamp(
+        date.get_hours(),
+        date.get_minutes(),
+        date.get_seconds(),
+        date.get_milliseconds(),
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn current_message_timestamp() -> String {
+    let now = chrono::Local::now();
+    format_message_timestamp(
+        now.hour(),
+        now.minute(),
+        now.second(),
+        now.nanosecond() / 1_000_000,
+    )
+}
+
+pub fn preset_command_id_from_epoch_millis(epoch_millis: f64) -> String {
+    format!("{:x}", epoch_millis.max(0.0).floor() as u128)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn new_preset_command_id() -> String {
+    preset_command_id_from_epoch_millis(js_sys::Date::now())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn new_preset_command_id() -> String {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as f64)
+        .unwrap_or(0.0);
+    preset_command_id_from_epoch_millis(millis)
 }
 
 pub fn should_continue_loop_send(is_connected: bool, loop_send: bool) -> bool {
@@ -254,6 +301,10 @@ pub fn normalize_loop_interval_ms(interval_ms: u64) -> u64 {
 
 pub fn can_toggle_connection(is_connected: bool, port_name: &str, is_in_progress: bool) -> bool {
     !is_in_progress && (is_connected || !port_name.is_empty())
+}
+
+pub fn should_scroll_receive_log(auto_scroll: bool, message_count: usize) -> bool {
+    auto_scroll && message_count > 0
 }
 
 #[cfg(test)]
@@ -305,6 +356,7 @@ pub struct AppState {
     pub received_messages: Signal<Vec<ReceivedMessage>>,
     pub receive_line_buffer: Signal<ReceiveLineBuffer>,
     pub serial_data_listener_registered: Signal<bool>,
+    pub preset_commands_loaded: Signal<bool>,
     pub log_entries: Signal<Vec<LogEntry>>,
     pub preset_commands: Signal<Vec<PresetCommand>>,
     pub bytes_received: Signal<u64>,
@@ -326,6 +378,7 @@ impl AppState {
             received_messages: Signal::new(Vec::new()),
             receive_line_buffer: Signal::new(ReceiveLineBuffer::default()),
             serial_data_listener_registered: Signal::new(false),
+            preset_commands_loaded: Signal::new(false),
             log_entries: Signal::new(Vec::new()),
             preset_commands: Signal::new(Vec::new()),
             bytes_received: Signal::new(0),
@@ -448,12 +501,40 @@ mod tests {
     }
 
     #[test]
+    fn one_time_action_can_only_be_claimed_once() {
+        let mut claimed = false;
+
+        assert!(claim_once(&mut claimed));
+        assert!(!claim_once(&mut claimed));
+        assert!(claimed);
+    }
+
+    #[test]
     fn connection_toggle_is_disabled_while_request_is_in_progress() {
         assert!(!can_toggle_connection(false, "tty.usbserial", true));
         assert!(!can_toggle_connection(true, "tty.usbserial", true));
         assert!(!can_toggle_connection(false, "", false));
         assert!(can_toggle_connection(false, "tty.usbserial", false));
         assert!(can_toggle_connection(true, "", false));
+    }
+
+    #[test]
+    fn receive_log_scrolls_only_when_auto_scroll_is_enabled_and_has_messages() {
+        assert!(!should_scroll_receive_log(true, 0));
+        assert!(!should_scroll_receive_log(false, 1));
+        assert!(should_scroll_receive_log(true, 1));
+    }
+
+    #[test]
+    fn message_timestamp_formats_with_millisecond_precision() {
+        assert_eq!(format_message_timestamp(1, 2, 3, 4), "01:02:03.004");
+        assert_eq!(format_message_timestamp(12, 34, 56, 789), "12:34:56.789");
+    }
+
+    #[test]
+    fn preset_command_id_formats_from_epoch_millis_without_std_time_in_callers() {
+        assert_eq!(preset_command_id_from_epoch_millis(0.0), "0");
+        assert_eq!(preset_command_id_from_epoch_millis(255.0), "ff");
     }
 
     #[test]
