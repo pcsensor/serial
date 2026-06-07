@@ -32,18 +32,22 @@ jobs:
             platform: macos-latest
             args: --target aarch64-apple-darwin
             rust-targets: wasm32-unknown-unknown,aarch64-apple-darwin
+            artifact-name: macos-aarch64
           - name: macOS Intel
             platform: macos-latest
             args: --target x86_64-apple-darwin
             rust-targets: wasm32-unknown-unknown,x86_64-apple-darwin
+            artifact-name: macos-x86_64
           - name: Linux x64
             platform: ubuntu-22.04
             args: ""
             rust-targets: wasm32-unknown-unknown
+            artifact-name: linux-x86_64
           - name: Windows x64
             platform: windows-latest
             args: ""
             rust-targets: wasm32-unknown-unknown
+            artifact-name: windows-x86_64
 
     steps:
       - name: Checkout
@@ -92,7 +96,7 @@ jobs:
           cargo install tauri-cli --version "^2.0" --locked
           cargo install dioxus-cli --version "^0.7" --locked
 
-      - name: Build and upload Tauri artifacts
+      - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -100,5 +104,14 @@ jobs:
         with:
           tauriScript: cargo tauri
           args: ${{ matrix.args }}
-          uploadWorkflowArtifacts: true
-          workflowArtifactNamePattern: "[platform]-[arch]-[bundle]"
+
+      - name: Upload Tauri artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}
+          if-no-files-found: error
+          path: |
+            src-tauri/target/release/bundle/**/*
+            src-tauri/target/*/release/bundle/**/*
+            target/release/bundle/**/*
+            target/*/release/bundle/**/*
