@@ -29,7 +29,7 @@ fn main() {
             #[cfg(target_os = "macos")]
             {
                 use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial};
-                let _ = apply_vibrancy(&window, NSVisualEffectMaterial::Sidebar, None, None);
+                let _ = apply_vibrancy(&window, NSVisualEffectMaterial::Sidebar, None, Some(12.0));
             }
             #[cfg(target_os = "windows")]
             {

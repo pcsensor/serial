@@ -123,6 +123,7 @@ pub fn ReceiveSendTab() -> Element {
     let encoding = state.send_encoding.read().clone();
     let line_ending = state.send_line_ending.read().clone();
     let auto_scroll = *state.auto_scroll.read();
+    let hex_display = *state.hex_display.read();
 
     rsx! {
         div {
@@ -137,7 +138,7 @@ pub fn ReceiveSendTab() -> Element {
                     for (index, msg) in messages.iter().enumerate() {
                         {
                             let direction = message_direction_label(&msg.direction);
-                            let data = visualize_serial_data(&msg.data);
+                            let data = format_message_display(msg, hex_display);
                             let direction_color = if msg.direction == MessageDirection::Sent {
                                 "color:#22c55e;margin:0 6px;"
                             } else {
@@ -167,6 +168,17 @@ pub fn ReceiveSendTab() -> Element {
                             },
                         }
                         "自动滚动"
+                    }
+                    label {
+                        style: "display:flex;align-items:center;gap:4px;font-size:11px;color:#888;",
+                        input {
+                            r#type: "checkbox",
+                            checked: hex_display,
+                            onchange: move |e| {
+                                *state.hex_display.write() = e.checked();
+                            },
+                        }
+                        "HEX显示"
                     }
                     div { style: "flex:1;" }
                     button { class: "btn btn-secondary", onclick: clear, "清空" }

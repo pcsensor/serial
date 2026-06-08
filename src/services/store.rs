@@ -247,6 +247,49 @@ pub fn visualize_serial_data(data: &str) -> String {
         .collect()
 }
 
+pub fn format_message_display(msg: &ReceivedMessage, hex_display: bool) -> String {
+    if !hex_display {
+        return visualize_serial_data(&msg.data);
+    }
+    if !msg.raw_bytes.is_empty() {
+        format_hex_bytes(&msg.raw_bytes)
+    } else {
+        re_encode_to_hex(&msg.data, &msg.encoding)
+    }
+}
+
+fn format_hex_bytes(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|b| format!("{:02X}", b))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn re_encode_to_hex(data: &str, encoding: &Encoding) -> String {
+    match encoding {
+        Encoding::Hex => {
+            // Data from backend is already hex-formatted (e.g. "48 65 6C")
+            // Just ensure consistent formatting
+            let cleaned: String = data.chars().filter(|c| !c.is_whitespace()).collect();
+            (0..cleaned.len())
+                .step_by(2)
+                .filter_map(|i| {
+                    if i + 2 <= cleaned.len() {
+                        Some(cleaned[i..i + 2].to_uppercase())
+                    } else {
+                        Some(cleaned[i..].to_uppercase())
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+        Encoding::Ascii | Encoding::Utf8 | Encoding::Gbk => {
+            format_hex_bytes(data.as_bytes())
+        }
+    }
+}
+
 pub fn format_message_timestamp(hour: u32, minute: u32, second: u32, millisecond: u32) -> String {
     format!("{hour:02}:{minute:02}:{second:02}.{millisecond:03}")
 }
@@ -366,6 +409,7 @@ pub struct AppState {
     pub auto_scroll: Signal<bool>,
     pub loop_send: Signal<bool>,
     pub loop_interval_ms: Signal<u64>,
+    pub hex_display: Signal<bool>,
 }
 
 impl AppState {
@@ -388,6 +432,7 @@ impl AppState {
             auto_scroll: Signal::new(true),
             loop_send: Signal::new(false),
             loop_interval_ms: Signal::new(1000),
+            hex_display: Signal::new(false),
         }
     }
 }
@@ -466,6 +511,68 @@ mod tests {
         assert_eq!(message.direction, MessageDirection::Sent);
         assert_eq!(message_direction_label(&message.direction), "发送");
         assert_eq!(visualize_serial_data(&message.data), "AT\\r\\n");
+    }
+
+    #[test]
+    fn format_message_display_shows_text_when_hex_is_off() {
+        let msg = ReceivedMessage {
+            direction: MessageDirection::Received,
+            timestamp: "12:34:56.789".to_string(),
+            data: "hello\r\n".to_string(),
+            encoding: Encoding::Ascii,
+            raw_bytes: vec![0x68, 0x65, 0x6C, 0x6C, 0x6F, 0x0D, 0x0A],
+        };
+
+        assert_eq!(format_message_display(&msg, false), "hello\\r\\n");
+    }
+
+    #[test]
+    fn format_message_display_shows_hex_from_raw_bytes() {
+        let msg = ReceivedMessage {
+            direction: MessageDirection::Received,
+            timestamp: "12:34:56.789".to_string(),
+            data: "hello".to_string(),
+            encoding: Encoding::Ascii,
+            raw_bytes: vec![0x68, 0x65, 0x6C, 0x6C, 0x6F],
+        };
+
+        assert_eq!(format_message_display(&msg, true), "68 65 6C 6C 6F");
+    }
+
+    #[test]
+    fn format_message_display_falls_back_to_re_encode_when_raw_bytes_empty() {
+        let msg = ReceivedMessage {
+            direction: MessageDirection::Received,
+            timestamp: "12:34:56.789".to_string(),
+            data: "hello".to_string(),
+            encoding: Encoding::Utf8,
+            raw_bytes: Vec::new(),
+        };
+
+        assert_eq!(format_message_display(&msg, true), "68 65 6C 6C 6F");
+    }
+
+    #[test]
+    fn format_hex_bytes_formats_correctly() {
+        assert_eq!(format_hex_bytes(&[0x00, 0xFF, 0x0A]), "00 FF 0A");
+        assert_eq!(format_hex_bytes(&[]), "");
+    }
+
+    #[test]
+    fn re_encode_to_hex_handles_hex_encoded_data() {
+        // When backend already hex-formatted the data
+        assert_eq!(
+            re_encode_to_hex("48 65 6C", &Encoding::Hex),
+            "48 65 6C"
+        );
+    }
+
+    #[test]
+    fn re_encode_to_hex_handles_text_encodings() {
+        assert_eq!(
+            re_encode_to_hex("Hi", &Encoding::Ascii),
+            "48 69"
+        );
     }
 
     #[test]
