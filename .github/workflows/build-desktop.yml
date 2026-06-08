@@ -135,5 +135,8 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*
+          files: |
+            artifacts/**/*.dmg
+            artifacts/**/*.deb
+            artifacts/**/*-setup.exe
           generate_release_notes: true
