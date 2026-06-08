@@ -65,7 +65,13 @@ jobs:
 
       - name: Install wasm-opt (Windows)
         if: matrix.platform == 'windows-latest'
-        run: choco install binaryen --no-progress -y
+        shell: pwsh
+        run: |
+          $ver = "version_121"
+          $url = "https://github.com/WebAssembly/binaryen/releases/download/$ver/binaryen-$ver-x86_64-windows.tar.gz"
+          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\binaryen.tar.gz"
+          tar -xzf "$env:RUNNER_TEMP\binaryen.tar.gz" -C "$env:RUNNER_TEMP"
+          "$env:RUNNER_TEMP\binaryen-$ver\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
