@@ -101,6 +101,18 @@ jobs:
           cargo install tauri-cli --version "^2.0" --locked
           cargo install dioxus-cli --version "^0.7" --locked
 
+      - name: Sync version from git tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "Syncing version to: $TAG_VERSION"
+          # Update src-tauri/Cargo.toml
+          sed -i.bak "0,/^version = /s/^version = \".*\"/version = \"$TAG_VERSION\"/" src-tauri/Cargo.toml
+          # Update tauri.conf.json
+          sed -i.bak "s/\"version\": \".*\"/\"version\": \"$TAG_VERSION\"/" src-tauri/tauri.conf.json
+          rm -f src-tauri/Cargo.toml.bak src-tauri/tauri.conf.json.bak
+
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -134,11 +146,32 @@ jobs:
         with:
           path: artifacts
 
+      - name: Rename artifacts to standard names
+        run: |
+          APP="serial-debugger"
+          VER="${GITHUB_REF_NAME}"   # e.g. v0.1.7
+
+          rename_first() {
+            local pattern="$1" dest="$2"
+            local src
+            src=$(find artifacts -name "$pattern" | head -n 1)
+            if [ -n "$src" ]; then
+              mv "$src" "artifacts/$dest"
+              echo "Renamed: $src -> artifacts/$dest"
+            else
+              echo "WARNING: no file matched pattern '$pattern'"
+            fi
+          }
+
+          rename_first "*.dmg"         "${APP}_${VER}_macos_aarch64.dmg"
+          rename_first "*.deb"         "${APP}_${VER}_linux_x86_64.deb"
+          rename_first "*-setup.exe"   "${APP}_${VER}_windows_x86_64.exe"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/**/*.dmg
-            artifacts/**/*.deb
-            artifacts/**/*-setup.exe
+            artifacts/serial-debugger_*.dmg
+            artifacts/serial-debugger_*.deb
+            artifacts/serial-debugger_*.exe
           generate_release_notes: true
