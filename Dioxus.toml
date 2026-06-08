@@ -3,7 +3,6 @@ name = "serial-debugger"
 
 [web.app]
 title = "串口调试助手"
-wasm_opt = false
 
 [web.watcher]
 reload_html = true

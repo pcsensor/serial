@@ -50,6 +50,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            binaryen \
             build-essential \
             curl \
             libayatana-appindicator3-dev \
@@ -62,6 +63,10 @@ jobs:
             patchelf \
             pkg-config \
             rpm
+
+      - name: Install wasm-opt (macOS)
+        if: matrix.platform == 'macos-latest'
+        run: brew install binaryen
 
       - name: Stub wasm-opt (Windows)
         if: matrix.platform == 'windows-latest'
