@@ -63,6 +63,10 @@ jobs:
             pkg-config \
             rpm
 
+      - name: Install wasm-opt (Windows)
+        if: matrix.platform == 'windows-latest'
+        run: choco install binaryen --no-progress -y
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
