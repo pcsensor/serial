@@ -32,7 +32,7 @@ jobs:
             artifact-name: macos-aarch64
           - name: Linux x64
             platform: ubuntu-22.04
-            args: --bundles deb appimage
+            args: --bundles deb
             rust-targets: wasm32-unknown-unknown
             artifact-name: linux-x86_64
           - name: Windows x64
