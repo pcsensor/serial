@@ -7,7 +7,7 @@
     "frontendDist": "../target/dx/serial-debugger-ui/release/web/public",
     "devUrl": "http://localhost:8080",
     "beforeDevCommand": "dx serve --port 8080 --interactive false",
-    "beforeBuildCommand": "dx build --release --debug-symbols false"
+    "beforeBuildCommand": "dx build --release --debug-symbols false --no-wasm-opt"
   },
   "app": {
     "withGlobalTauri": true,
