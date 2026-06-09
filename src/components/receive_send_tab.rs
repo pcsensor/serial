@@ -29,7 +29,14 @@ pub fn ReceiveSendTab() -> Element {
                         split_received_message_lines(&mut buffer, payload)
                     };
                     if !lines.is_empty() {
-                        state.received_messages.write().extend(lines);
+                        let mut msgs = state.received_messages.write();
+                        msgs.extend(lines);
+                        // 防止长时间高波特率接收导致内存无限增长
+                        const MAX_MESSAGES: usize = 10_000;
+                        let len = msgs.len();
+                        if len > MAX_MESSAGES {
+                            msgs.drain(0..len - MAX_MESSAGES);
+                        }
                     }
                     *state.bytes_received.write() += len;
                 }
@@ -256,7 +263,7 @@ pub fn ReceiveSendTab() -> Element {
                                 let is_loop = *state.loop_send.read();
                                 *state.loop_send.write() = !is_loop;
                                 if !is_loop {
-                                    let content = (*send_text.read()).clone();
+                                     let content = (*send_text.read()).clone();
                                     let encoding_val = (*state.send_encoding.read()).clone();
                                     let line_ending_val = (*state.send_line_ending.read()).clone();
                                     let wire_content = apply_send_line_ending(
@@ -264,7 +271,6 @@ pub fn ReceiveSendTab() -> Element {
                                         &encoding_val,
                                         &line_ending_val,
                                     );
-                                    let interval = normalize_loop_interval_ms(*state.loop_interval_ms.read());
                                     let mut st = state;
                                     spawn(async move {
                                         loop {
@@ -296,6 +302,8 @@ pub fn ReceiveSendTab() -> Element {
                                                     break;
                                                 }
                                             }
+                                            // 每次迭代重读间隔，实时响应 UI 调整
+                                            let interval = normalize_loop_interval_ms(*st.loop_interval_ms.read());
                                             gloo_timers::future::sleep(
                                                 std::time::Duration::from_millis(interval)
                                             ).await;

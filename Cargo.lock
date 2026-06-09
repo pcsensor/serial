@@ -4495,7 +4495,6 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
  "tauri-plugin-store",
- "uuid",
  "window-vibrancy 0.7.1",
 ]
 

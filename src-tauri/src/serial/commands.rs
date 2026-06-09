@@ -58,6 +58,5 @@ pub fn send_data(state: State<SerialState>, request: SendRequest) -> Result<usiz
 
 #[tauri::command]
 pub fn is_port_open(state: State<SerialState>) -> bool {
-    let manager = state.0.lock().unwrap();
-    manager.is_open()
+    state.0.lock().map(|m| m.is_open()).unwrap_or(false)
 }

@@ -157,7 +157,7 @@ impl SerialManager {
         let handle = thread::spawn(move || {
             let mut buffer = vec![0u8; 1024];
             loop {
-                if stop_flag.load(Ordering::Relaxed) {
+                if stop_flag.load(Ordering::Acquire) {
                     break;
                 }
                 match reader.read(&mut buffer) {
@@ -203,6 +203,10 @@ impl SerialManager {
                     written += n;
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                // 非阻塞模式下发送缓冲区满时返回 WouldBlock，短暂等待后重试
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
                 Err(e) => {
                     return Err(format!("发送失败: {}", e));
                 }
@@ -214,15 +218,18 @@ impl SerialManager {
 
     pub fn close(&mut self) -> Result<(), String> {
         if let Some(stop_flag) = self.stop_flag.take() {
-            stop_flag.store(true, Ordering::Relaxed);
+            stop_flag.store(true, Ordering::Release);
+        }
+        // 先 join 线程，确保接收线程退出后再关闭 port，避免
+        // reader（try_clone_native 克隆的 fd）在 port 关闭后
+        // 收到 EIO 并向已无窗口的 app_handle 发送错误事件。
+        if let Some(handle) = self.receiver_handle.take() {
+            handle.join().map_err(|_| "接收线程关闭失败".to_string())?;
         }
         if let Some(port) = self.port.as_mut() {
             let _ = port.clear(ClearBuffer::All);
         }
         self.port = None;
-        if let Some(handle) = self.receiver_handle.take() {
-            handle.join().map_err(|_| "接收线程关闭失败".to_string())?;
-        }
         Ok(())
     }
 
@@ -241,27 +248,83 @@ mod tests {
         flags & libc::O_NONBLOCK != 0
     }
 
+    /// 打开 PTY 设备的测试辅助。
+    ///
+    /// macOS 上两个 ioctl 对 PTY 不支持，会返回 ENOTTY：
+    /// 1. `TIOCEXCL` — serialport 默认 exclusive=true 时调用，PTY 不支持独占锁。
+    ///    修复：`.exclusive(false)`
+    /// 2. `IOSSIOSPEED` — macOS 专用的非标准波特率设置，只有真实串口才支持。
+    ///    serialport 源码注释原文："attempting to set the baud rate on a pseudo terminal
+    ///    via this ioctl call will fail with the ENOTTY error."
+    ///    修复：`baud_rate=0`，serialport 内部跳过该 ioctl（见 termios.rs set_termios）。
+    ///
+    /// 生产代码打开真实串口时两者均受支持，不受影响。
+    #[cfg(unix)]
+    fn open_pty_for_test(manager: &mut SerialManager, config: &PortConfig) -> Result<(), String> {
+        let data_bits = match config.data_bits {
+            5 => serialport::DataBits::Five,
+            6 => serialport::DataBits::Six,
+            7 => serialport::DataBits::Seven,
+            8 => serialport::DataBits::Eight,
+            _ => return Err("无效的数据位".to_string()),
+        };
+        let stop_bits = match config.stop_bits.as_str() {
+            "1" => serialport::StopBits::One,
+            "2" => serialport::StopBits::Two,
+            _ => return Err("无效的停止位".to_string()),
+        };
+        let parity = match config.parity.as_str() {
+            "none" => serialport::Parity::None,
+            "odd"  => serialport::Parity::Odd,
+            "even" => serialport::Parity::Even,
+            _ => return Err("无效的校验位".to_string()),
+        };
+        let flow_control = match config.flow_control.as_str() {
+            "none"     => serialport::FlowControl::None,
+            "rts_cts"  => serialport::FlowControl::Hardware,
+            "xon_xoff" => serialport::FlowControl::Software,
+            _ => return Err("无效的流控方式".to_string()),
+        };
+
+        let builder = serialport::new(&config.port_name, config.baud_rate)
+            .data_bits(data_bits)
+            .stop_bits(stop_bits)
+            .parity(parity)
+            .flow_control(flow_control)
+            .timeout(WRITE_TIMEOUT)
+            // macOS PTY 不支持 TIOCEXCL（独占 ioctl），需关闭 exclusive
+            .exclusive(false)
+            // macOS PTY 不支持 IOSSIOSPEED（非标准波特率 ioctl）。
+            // baud_rate=0 告知 serialport 跳过该 ioctl（见 posix/termios.rs:set_termios）。
+            .baud_rate(0);
+
+        let mut port = NativePort::open(&builder)
+            .map_err(|e| format!("打开串口失败: {}", e))?;
+
+        configure_nonblocking(&port)?;
+        assert_terminal_ready(&mut port);
+        manager.port = Some(port);
+        Ok(())
+    }
+
     #[cfg(unix)]
     #[test]
     fn open_configures_unix_tty_as_nonblocking() {
         use serialport::SerialPort;
         use std::os::unix::io::AsRawFd;
 
-        let (_master, slave) = serialport::TTYPort::pair().unwrap();
-        let port_name = slave.name().unwrap();
-        drop(slave);
+        let (_master, _slave) = serialport::TTYPort::pair().unwrap();
+        let port_name = _slave.name().unwrap();
 
         let mut manager = SerialManager::new();
-        manager
-            .open(&PortConfig {
-                port_name,
-                baud_rate: 115200,
-                data_bits: 8,
-                stop_bits: "1".to_string(),
-                parity: "none".to_string(),
-                flow_control: "none".to_string(),
-            })
-            .unwrap();
+        open_pty_for_test(&mut manager, &PortConfig {
+            port_name,
+            baud_rate: 115200,
+            data_bits: 8,
+            stop_bits: "1".to_string(),
+            parity: "none".to_string(),
+            flow_control: "none".to_string(),
+        }).unwrap();
 
         let fd = manager.port.as_ref().unwrap().as_raw_fd();
         assert!(fd_is_nonblocking(fd));
@@ -270,24 +333,20 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn send_waits_for_temporarily_full_unix_output_queue() {
-        use serialport::SerialPort;
         use std::io::{Read, Write};
 
-        let (mut master, slave) = serialport::TTYPort::pair().unwrap();
-        let port_name = slave.name().unwrap();
-        drop(slave);
+        let (mut master, _slave) = serialport::TTYPort::pair().unwrap();
+        let port_name = _slave.name().unwrap();
 
         let mut manager = SerialManager::new();
-        manager
-            .open(&PortConfig {
-                port_name,
-                baud_rate: 115200,
-                data_bits: 8,
-                stop_bits: "1".to_string(),
-                parity: "none".to_string(),
-                flow_control: "none".to_string(),
-            })
-            .unwrap();
+        open_pty_for_test(&mut manager, &PortConfig {
+            port_name,
+            baud_rate: 115200,
+            data_bits: 8,
+            stop_bits: "1".to_string(),
+            parity: "none".to_string(),
+            flow_control: "none".to_string(),
+        }).unwrap();
 
         let filler = vec![0x55; 4096];
         let mut saturated = false;
@@ -327,21 +386,18 @@ mod tests {
     fn open_keeps_write_timeout_low_for_responsive_sends() {
         use serialport::SerialPort;
 
-        let (_master, slave) = serialport::TTYPort::pair().unwrap();
-        let port_name = slave.name().unwrap();
-        drop(slave);
+        let (_master, _slave) = serialport::TTYPort::pair().unwrap();
+        let port_name = _slave.name().unwrap();
 
         let mut manager = SerialManager::new();
-        manager
-            .open(&PortConfig {
-                port_name,
-                baud_rate: 115200,
-                data_bits: 8,
-                stop_bits: "1".to_string(),
-                parity: "none".to_string(),
-                flow_control: "none".to_string(),
-            })
-            .unwrap();
+        open_pty_for_test(&mut manager, &PortConfig {
+            port_name,
+            baud_rate: 115200,
+            data_bits: 8,
+            stop_bits: "1".to_string(),
+            parity: "none".to_string(),
+            flow_control: "none".to_string(),
+        }).unwrap();
 
         assert_eq!(
             manager.port.as_ref().unwrap().timeout(),
