@@ -29,7 +29,7 @@ pub fn decode(data: &[u8], encoding: &Encoding) -> Result<String, String> {
 
 fn parse_hex(input: &str) -> Result<Vec<u8>, String> {
     let cleaned: String = input.chars().filter(|c| !c.is_whitespace()).collect();
-    if cleaned.len() % 2 != 0 {
+    if !cleaned.len().is_multiple_of(2) {
         return Err("HEX 字符串长度必须为偶数".to_string());
     }
     (0..cleaned.len())

@@ -274,19 +274,17 @@ fn re_encode_to_hex(data: &str, encoding: &Encoding) -> String {
             let cleaned: String = data.chars().filter(|c| !c.is_whitespace()).collect();
             (0..cleaned.len())
                 .step_by(2)
-                .filter_map(|i| {
+                .map(|i| {
                     if i + 2 <= cleaned.len() {
-                        Some(cleaned[i..i + 2].to_uppercase())
+                        cleaned[i..i + 2].to_uppercase()
                     } else {
-                        Some(cleaned[i..].to_uppercase())
+                        cleaned[i..].to_uppercase()
                     }
                 })
                 .collect::<Vec<_>>()
                 .join(" ")
         }
-        Encoding::Ascii | Encoding::Utf8 | Encoding::Gbk => {
-            format_hex_bytes(data.as_bytes())
-        }
+        Encoding::Ascii | Encoding::Utf8 | Encoding::Gbk => format_hex_bytes(data.as_bytes()),
     }
 }
 
@@ -400,7 +398,6 @@ pub struct AppState {
     pub receive_line_buffer: Signal<ReceiveLineBuffer>,
     pub serial_data_listener_registered: Signal<bool>,
     pub preset_commands_loaded: Signal<bool>,
-    pub log_entries: Signal<Vec<LogEntry>>,
     pub preset_commands: Signal<Vec<PresetCommand>>,
     pub bytes_received: Signal<u64>,
     pub bytes_sent: Signal<u64>,
@@ -423,7 +420,6 @@ impl AppState {
             receive_line_buffer: Signal::new(ReceiveLineBuffer::default()),
             serial_data_listener_registered: Signal::new(false),
             preset_commands_loaded: Signal::new(false),
-            log_entries: Signal::new(Vec::new()),
             preset_commands: Signal::new(Vec::new()),
             bytes_received: Signal::new(0),
             bytes_sent: Signal::new(0),
@@ -561,18 +557,12 @@ mod tests {
     #[test]
     fn re_encode_to_hex_handles_hex_encoded_data() {
         // When backend already hex-formatted the data
-        assert_eq!(
-            re_encode_to_hex("48 65 6C", &Encoding::Hex),
-            "48 65 6C"
-        );
+        assert_eq!(re_encode_to_hex("48 65 6C", &Encoding::Hex), "48 65 6C");
     }
 
     #[test]
     fn re_encode_to_hex_handles_text_encodings() {
-        assert_eq!(
-            re_encode_to_hex("Hi", &Encoding::Ascii),
-            "48 69"
-        );
+        assert_eq!(re_encode_to_hex("Hi", &Encoding::Ascii), "48 69");
     }
 
     #[test]

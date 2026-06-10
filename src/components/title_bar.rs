@@ -15,9 +15,8 @@ pub fn TitleBar() -> Element {
     rsx! {
         div {
             style: "display:flex;align-items:center;justify-content:space-between;padding:8px 16px;background:rgba(0,0,0,0.2);",
-            "data-tauri-drag-region": "true",
             div {
-                style: "display:flex;align-items:center;gap:8px;",
+                style: "display:flex;align-items:center;gap:8px;flex:1;min-width:0;",
                 "data-tauri-drag-region": "true",
                 span {
                     style: "font-size:14px;font-weight:600;background:linear-gradient(135deg,#667eea,#764ba2);-webkit-background-clip:text;-webkit-text-fill-color:transparent;",
@@ -25,7 +24,7 @@ pub fn TitleBar() -> Element {
                 }
             }
             div {
-                style: "display:flex;gap:8px;",
+                style: "display:flex;gap:8px;flex-shrink:0;",
                 button {
                     class: "btn btn-secondary",
                     style: "padding:4px 10px;font-size:12px;",

@@ -8,6 +8,7 @@ const RECEIVE_LOG_CONTAINER_ID: &str = "receive-log-container";
 pub fn ReceiveSendTab() -> Element {
     let mut state: AppState = use_context();
     let mut send_text = use_signal(String::new);
+    let mut export_format = use_signal(|| "txt".to_string());
 
     use_effect(move || {
         if !claim_serial_data_listener_registration(
@@ -91,6 +92,7 @@ pub fn ReceiveSendTab() -> Element {
     };
 
     let export = move |_| {
+        let format = export_format.read().clone();
         let entries: Vec<LogEntry> = state
             .received_messages
             .read()
@@ -106,7 +108,6 @@ pub fn ReceiveSendTab() -> Element {
             let path: Result<Option<String>, String> =
                 api::tauri_invoke_no_args("save_dialog").await;
             if let Ok(Some(p)) = path {
-                let format = if p.ends_with(".csv") { "csv" } else { "txt" };
                 #[derive(serde::Serialize)]
                 struct Args {
                     entries: Vec<LogEntry>,
@@ -118,7 +119,7 @@ pub fn ReceiveSendTab() -> Element {
                     &Args {
                         entries,
                         path: p,
-                        format: format.to_string(),
+                        format,
                     },
                 )
                 .await;
@@ -188,6 +189,16 @@ pub fn ReceiveSendTab() -> Element {
                         "HEX显示"
                     }
                     div { style: "flex:1;" }
+                    select {
+                        class: "glass-select",
+                        style: "width:86px;flex:0 0 86px;",
+                        value: "{export_format}",
+                        onchange: move |e| {
+                            *export_format.write() = e.value();
+                        },
+                        option { value: "txt", "TXT" }
+                        option { value: "csv", "CSV" }
+                    }
                     button { class: "btn btn-secondary", onclick: clear, "清空" }
                     button { class: "btn btn-secondary", onclick: export, "导出" }
                 }

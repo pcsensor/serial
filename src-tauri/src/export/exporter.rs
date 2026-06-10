@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry {
@@ -32,33 +32,54 @@ pub fn export_csv(entries: &[LogEntry], path: &str) -> Result<(), String> {
     fs::write(Path::new(path), content).map_err(|e| format!("写入文件失败: {}", e))
 }
 
-/// 校验导出路径的扩展名与 format 参数是否一致，防止前端绕过对话框写入任意路径
-fn validate_export_path(path: &str, format: &str) -> Result<(), String> {
-    let ext = Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
-    if ext.to_lowercase() != format {
-        return Err(format!(
-            "路径扩展名不匹配: 期望 .{}，实际 .{}",
-            format, ext
-        ));
+/// 规范化导出路径：Windows 保存对话框切换筛选器时可能只返回无扩展名路径。
+fn normalize_export_path(path: &str, format: &str) -> Result<PathBuf, String> {
+    let mut path = PathBuf::from(path);
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+
+    if ext.is_empty() {
+        path.set_extension(format);
+        return Ok(path);
     }
-    Ok(())
+
+    if !ext.eq_ignore_ascii_case(format) {
+        return Err(format!("路径扩展名不匹配: 期望 .{}，实际 .{}", format, ext));
+    }
+
+    Ok(path)
 }
 
 #[tauri::command]
 pub fn export_data(entries: Vec<LogEntry>, path: String, format: String) -> Result<(), String> {
     match format.as_str() {
         "txt" => {
-            validate_export_path(&path, "txt")?;
-            export_txt(&entries, &path)
+            let path = normalize_export_path(&path, "txt")?;
+            export_txt(&entries, &path.to_string_lossy())
         }
         "csv" => {
-            validate_export_path(&path, "csv")?;
-            export_csv(&entries, &path)
+            let path = normalize_export_path(&path, "csv")?;
+            export_csv(&entries, &path.to_string_lossy())
         }
         _ => Err("不支持的导出格式".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_export_path;
+
+    #[test]
+    fn normalize_export_path_appends_missing_csv_extension() {
+        let path = normalize_export_path("log", "csv").expect("path should normalize");
+
+        assert_eq!(path.to_string_lossy(), "log.csv");
+    }
+
+    #[test]
+    fn normalize_export_path_rejects_mismatched_extension() {
+        let err = normalize_export_path("log.txt", "csv").expect_err("extension must match format");
+
+        assert!(err.contains("路径扩展名不匹配"));
     }
 }
 
@@ -75,4 +96,3 @@ pub async fn save_dialog(app: tauri::AppHandle) -> Result<Option<String>, String
         });
     rx.recv().map_err(|e| e.to_string())
 }
-
