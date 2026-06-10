@@ -1,0 +1,152 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1e2240"/>
+      <stop offset="100%" stop-color="#0d1117"/>
+    </linearGradient>
+    <linearGradient id="bgEdge" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#2a3060"/>
+      <stop offset="100%" stop-color="#0a0e14"/>
+    </linearGradient>
+    <linearGradient id="metal" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#dce3ed"/>
+      <stop offset="20%" stop-color="#b8c6db"/>
+      <stop offset="55%" stop-color="#8a9bb5"/>
+      <stop offset="80%" stop-color="#a0b0c8"/>
+      <stop offset="100%" stop-color="#6b7d96"/>
+    </linearGradient>
+    <linearGradient id="metalSide" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#7a8ca6"/>
+      <stop offset="50%" stop-color="#b8c6db"/>
+      <stop offset="100%" stop-color="#7a8ca6"/>
+    </linearGradient>
+    <linearGradient id="face" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#252d45"/>
+      <stop offset="100%" stop-color="#161c30"/>
+    </linearGradient>
+    <radialGradient id="pinMetal">
+      <stop offset="0%" stop-color="#f0f4ff"/>
+      <stop offset="35%" stop-color="#c8d0e0"/>
+      <stop offset="100%" stop-color="#6b7d96"/>
+    </radialGradient>
+    <radialGradient id="ledG" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#88ffcc"/>
+      <stop offset="25%" stop-color="#00ff88"/>
+      <stop offset="65%" stop-color="#00cc66"/>
+      <stop offset="100%" stop-color="#008844"/>
+    </radialGradient>
+    <radialGradient id="screwG" cx="35%" cy="35%">
+      <stop offset="0%" stop-color="#c0c8d8"/>
+      <stop offset="100%" stop-color="#4a5568"/>
+    </radialGradient>
+    <linearGradient id="topShine" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.12"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="sh" x="-15%" y="-10%" width="130%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="18" flood-color="#000" flood-opacity="0.55"/>
+    </filter>
+    <filter id="glow" x="-150%" y="-150%" width="400%" height="400%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="14" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="glowBig" x="-300%" y="-300%" width="700%" height="700%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="28"/>
+    </filter>
+    <filter id="inset" x="-5%" y="-5%" width="110%" height="110%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="6" result="blur"/>
+      <feOffset dx="0" dy="4" result="off"/>
+      <feComposite in="off" in2="SourceAlpha" operator="arithmetic" k2="-1" k3="1" result="shadow"/>
+      <feFlood flood-color="#000" flood-opacity="0.4" result="color"/>
+      <feComposite in="color" in2="shadow" operator="in" result="inShadow"/>
+      <feMerge>
+        <feMergeNode in="SourceGraphic"/>
+        <feMergeNode in="inShadow"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- 背景 -->
+  <rect x="16" y="16" width="992" height="992" rx="210" fill="url(#bgEdge)"/>
+  <rect x="20" y="20" width="984" height="984" rx="206" fill="url(#bg)"/>
+  <rect x="20" y="20" width="984" height="490" rx="206" fill="url(#topShine)"/>
+
+  <!-- 连接器投影 -->
+  <g filter="url(#sh)">
+    <path d="M 215 305 L 809 305 Q 845 305 855 340 L 810 685 Q 800 718 765 718 L 259 718 Q 224 718 214 685 L 169 340 Q 179 305 215 305 Z" fill="url(#metal)"/>
+  </g>
+
+  <!-- 金属外壳主体 -->
+  <path d="M 215 305 L 809 305 Q 845 305 855 340 L 810 685 Q 800 718 765 718 L 259 718 Q 224 718 214 685 L 169 340 Q 179 305 215 305 Z" fill="url(#metal)" stroke="#5a6a80" stroke-width="2"/>
+
+  <!-- 顶部高光边 -->
+  <path d="M 220 308 L 804 308 Q 838 308 848 340" fill="none" stroke="#e8eef8" stroke-width="3" opacity="0.5" stroke-linecap="round"/>
+  <path d="M 175 340 L 215 308" fill="none" stroke="#e8eef8" stroke-width="2" opacity="0.3" stroke-linecap="round"/>
+
+  <!-- 底部暗边 -->
+  <path d="M 264 715 L 760 715 Q 795 715 805 683" fill="none" stroke="#3a4a60" stroke-width="2" opacity="0.6" stroke-linecap="round"/>
+
+  <!-- 螺丝左 -->
+  <circle cx="148" cy="510" r="34" fill="url(#screwG)" stroke="#4a5a70" stroke-width="2.5"/>
+  <circle cx="148" cy="510" r="22" fill="none" stroke="#8a96a8" stroke-width="1" opacity="0.5"/>
+  <line x1="130" y1="510" x2="166" y2="510" stroke="#2d3748" stroke-width="5" stroke-linecap="round"/>
+  <line x1="148" y1="492" x2="148" y2="528" stroke="#2d3748" stroke-width="5" stroke-linecap="round"/>
+
+  <!-- 螺丝右 -->
+  <circle cx="876" cy="510" r="34" fill="url(#screwG)" stroke="#4a5a70" stroke-width="2.5"/>
+  <circle cx="876" cy="510" r="22" fill="none" stroke="#8a96a8" stroke-width="1" opacity="0.5"/>
+  <line x1="858" y1="510" x2="894" y2="510" stroke="#2d3748" stroke-width="5" stroke-linecap="round"/>
+  <line x1="876" y1="492" x2="876" y2="528" stroke="#2d3748" stroke-width="5" stroke-linecap="round"/>
+
+  <!-- 内腔 -->
+  <path d="M 262 360 L 762 360 Q 790 360 798 388 L 760 640 Q 752 665 724 665 L 300 665 Q 272 665 264 640 L 226 388 Q 234 360 262 360 Z" fill="url(#face)" filter="url(#inset)"/>
+  <path d="M 262 360 L 762 360 Q 790 360 798 388 L 760 640 Q 752 665 724 665 L 300 665 Q 272 665 264 640 L 226 388 Q 234 360 262 360 Z" fill="none" stroke="#0a0e18" stroke-width="3"/>
+
+  <!-- 上排针脚 (5个) -->
+  <circle cx="345" cy="455" r="24" fill="url(#pinMetal)" stroke="#4a5a70" stroke-width="2"/>
+  <circle cx="345" cy="450" r="10" fill="#fff" opacity="0.2"/>
+
+  <circle cx="433" cy="455" r="24" fill="url(#pinMetal)" stroke="#4a5a70" stroke-width="2"/>
+  <circle cx="433" cy="450" r="10" fill="#fff" opacity="0.2"/>
+
+  <circle cx="521" cy="455" r="24" fill="url(#pinMetal)" stroke="#4a5a70" stroke-width="2"/>
+  <circle cx="521" cy="450" r="10" fill="#fff" opacity="0.2"/>
+
+  <circle cx="609" cy="455" r="24" fill="url(#pinMetal)" stroke="#4a5a70" stroke-width="2"/>
+  <circle cx="609" cy="450" r="10" fill="#fff" opacity="0.2"/>
+
+  <circle cx="697" cy="455" r="24" fill="url(#pinMetal)" stroke="#4a5a70" stroke-width="2"/>
+  <circle cx="697" cy="450" r="10" fill="#fff" opacity="0.2"/>
+
+  <!-- 下排针脚 (4个) -->
+  <circle cx="389" cy="570" r="24" fill="url(#pinMetal)" stroke="#4a5a70" stroke-width="2"/>
+  <circle cx="389" cy="565" r="10" fill="#fff" opacity="0.2"/>
+
+  <circle cx="477" cy="570" r="24" fill="url(#pinMetal)" stroke="#4a5a70" stroke-width="2"/>
+  <circle cx="477" cy="565" r="10" fill="#fff" opacity="0.2"/>
+
+  <circle cx="565" cy="570" r="24" fill="url(#pinMetal)" stroke="#4a5a70" stroke-width="2"/>
+  <circle cx="565" cy="565" r="10" fill="#fff" opacity="0.2"/>
+
+  <circle cx="653" cy="570" r="24" fill="url(#pinMetal)" stroke="#4a5a70" stroke-width="2"/>
+  <circle cx="653" cy="565" r="10" fill="#fff" opacity="0.2"/>
+
+  <!-- LED 针脚覆盖 (Pin 3, 5, 6) -->
+  <circle cx="521" cy="455" r="24" fill="url(#ledG)" filter="url(#glow)"/>
+  <circle cx="697" cy="455" r="24" fill="url(#ledG)" filter="url(#glow)"/>
+  <circle cx="389" cy="570" r="24" fill="url(#ledG)" filter="url(#glow)"/>
+
+  <!-- LED 外层辉光 -->
+  <circle cx="521" cy="455" r="45" fill="#00ff88" opacity="0.18" filter="url(#glowBig)"/>
+  <circle cx="697" cy="455" r="45" fill="#00ff88" opacity="0.18" filter="url(#glowBig)"/>
+  <circle cx="389" cy="570" r="45" fill="#00ff88" opacity="0.18" filter="url(#glowBig)"/>
+
+  <!-- LED 中心高光 -->
+  <circle cx="516" cy="448" r="8" fill="#fff" opacity="0.55"/>
+  <circle cx="692" cy="448" r="8" fill="#fff" opacity="0.55"/>
+  <circle cx="384" cy="563" r="8" fill="#fff" opacity="0.55"/>
+</svg>
