@@ -105,24 +105,45 @@ pub fn ReceiveSendTab() -> Element {
             })
             .collect();
         spawn(async move {
-            let path: Result<Option<String>, String> =
-                api::tauri_invoke_no_args("save_dialog").await;
-            if let Ok(Some(p)) = path {
-                #[derive(serde::Serialize)]
-                struct Args {
-                    entries: Vec<LogEntry>,
-                    path: String,
-                    format: String,
+            #[derive(serde::Serialize)]
+            struct DialogArgs {
+                format: String,
+            }
+            // 把所选格式传给保存对话框，使对话框筛选器与下拉框保持一致。
+            let path: Result<Option<String>, String> = api::tauri_invoke(
+                "save_dialog",
+                &DialogArgs {
+                    format: format.clone(),
+                },
+            )
+            .await;
+            match path {
+                Ok(Some(p)) => {
+                    #[derive(serde::Serialize)]
+                    struct Args {
+                        entries: Vec<LogEntry>,
+                        path: String,
+                        format: String,
+                    }
+                    if let Err(e) = api::tauri_invoke::<_, ()>(
+                        "export_data",
+                        &Args {
+                            entries,
+                            path: p,
+                            format,
+                        },
+                    )
+                    .await
+                    {
+                        web_sys::console::error_1(&format!("[export] 导出失败: {}", e).into());
+                    }
                 }
-                let _: Result<(), String> = api::tauri_invoke(
-                    "export_data",
-                    &Args {
-                        entries,
-                        path: p,
-                        format,
-                    },
-                )
-                .await;
+                Ok(None) => {}
+                Err(e) => {
+                    web_sys::console::error_1(
+                        &format!("[export] 打开保存对话框失败: {}", e).into(),
+                    );
+                }
             }
         });
     };
