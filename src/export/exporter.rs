@@ -45,7 +45,12 @@ pub fn normalize_export_path(path: impl AsRef<Path>, format: &str) -> Result<Pat
 pub fn export_txt(entries: &[LogEntry], path: impl AsRef<Path>) -> Result<(), String> {
     let content = entries
         .iter()
-        .map(|e| format!("[{}] {}: {}", e.timestamp, e.direction, e.data))
+        .map(|e| {
+            format!(
+                "[{}] {} ({}): {}",
+                e.timestamp, e.direction, e.encoding, e.data
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
     fs::write(path, content).map_err(|e| format!("写入文件失败: {e}"))
@@ -99,5 +104,23 @@ mod tests {
             "csv"
         );
         assert!(normalize_export_path("log.txt", "csv").is_err());
+    }
+
+    #[test]
+    fn txt_includes_encoding_metadata() {
+        let file = std::env::temp_dir().join(format!("serial-test-{}.txt", uuid::Uuid::new_v4()));
+        export_txt(
+            &[LogEntry {
+                timestamp: "t".into(),
+                direction: "收到".into(),
+                encoding: "HEX".into(),
+                data: "41".into(),
+            }],
+            &file,
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains("收到 (HEX): 41"));
+        let _ = std::fs::remove_file(file);
     }
 }

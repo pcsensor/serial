@@ -8,7 +8,8 @@ use crate::{
 };
 use async_channel::Sender;
 use gpui::{
-    div, prelude::*, px, Context, ElementId, Entity, IntoElement, Render, SharedString, Window,
+    div, prelude::*, px, Context, ElementId, Entity, IntoElement, Render, ScrollHandle,
+    SharedString, StatefulInteractiveElement, Subscription, Window,
 };
 use gpui_component::{
     button::{Button, ButtonVariants},
@@ -30,7 +31,8 @@ pub struct AppView {
     state: AppState,
     manager: Arc<Mutex<SerialManager>>,
     events_tx: Sender<SerialEvent>,
-    stream_decoder: crate::serial::encoding::StreamDecoder,
+    receive_encoding: Encoding,
+    preview_decoder: crate::serial::encoding::StreamDecoder,
     available_ports: Vec<String>,
     port_input: Entity<InputState>,
     send_input: Entity<InputState>,
@@ -38,16 +40,22 @@ pub struct AppView {
     preset_content_input: Entity<InputState>,
     loop_interval_input: Entity<InputState>,
     loop_generation: Arc<AtomicU64>,
+    log_scroll_handle: ScrollHandle,
+    _port_input_subscription: Subscription,
     editing_preset: Option<usize>,
     last_export: Option<PathBuf>,
 }
 
 impl AppView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let settings = persistence::load();
+        let (settings, load_error) = match persistence::load_with_error() {
+            Ok(settings) => (settings, None),
+            Err(error) => (SavedSettings::default(), Some(error)),
+        };
         let state = AppState {
             config: settings.port_config.clone(),
             presets: settings.presets.clone(),
+            error: load_error,
             ..Default::default()
         };
         let (events_tx, events_rx) = async_channel::bounded(256);
@@ -69,6 +77,16 @@ impl AppView {
         });
         let preset_content_input = cx.new(|cx| InputState::new(window, cx).placeholder("命令内容"));
         let loop_interval_input = cx.new(|cx| InputState::new(window, cx).default_value("1000"));
+        let port_input_subscription = cx.subscribe(
+            &port_input,
+            |view, _, event: &gpui_component::input::InputEvent, cx| {
+                if matches!(event, gpui_component::input::InputEvent::Change) {
+                    view.sync_config_from_input(cx);
+                    view.save_settings();
+                    cx.notify();
+                }
+            },
+        );
         cx.spawn(async move |this, cx| {
             while let Ok(event) = events_rx.recv().await {
                 if this
@@ -87,7 +105,8 @@ impl AppView {
             state,
             manager,
             events_tx,
-            stream_decoder: crate::serial::encoding::StreamDecoder::default(),
+            receive_encoding: Encoding::default(),
+            preview_decoder: crate::serial::encoding::StreamDecoder::default(),
             available_ports,
             port_input,
             send_input,
@@ -95,6 +114,8 @@ impl AppView {
             preset_content_input,
             loop_interval_input,
             loop_generation: Arc::new(AtomicU64::new(0)),
+            log_scroll_handle: ScrollHandle::new(),
+            _port_input_subscription: port_input_subscription,
             editing_preset: None,
             last_export: None,
         }
@@ -103,31 +124,31 @@ impl AppView {
     fn handle_serial_event(&mut self, event: SerialEvent) {
         match event {
             SerialEvent::Data(data) => {
-                let text = self
-                    .stream_decoder
-                    .decode(&data.raw_bytes, &data.encoding)
-                    .unwrap_or_else(|_| {
-                        encoding::decode(&data.raw_bytes, &Encoding::Hex).unwrap_or_default()
-                    });
-                let message = state::ReceivedMessage {
-                    direction: MessageDirection::Received,
-                    timestamp: data.timestamp,
-                    data: text,
-                    encoding: data.encoding,
-                    raw_bytes: data.raw_bytes,
-                };
-                {
-                    self.state.bytes_received += message.raw_bytes.len() as u64;
-                    let lines = state::split_received_message_lines(
-                        &mut self.state.receive_buffer,
-                        message,
-                    );
-                    for line in lines {
-                        state::push_log_bounded(&mut self.state.messages, line);
-                    }
-                    self.state.receive_preview = self.state.receive_buffer.pending().to_owned();
-                    self.state.status = "正在接收".into();
+                self.receive_encoding = data.encoding.clone();
+                self.state.bytes_received += data.raw_bytes.len() as u64;
+                let lines = state::split_received_data_lines(
+                    &mut self.state.receive_buffer,
+                    &data.timestamp,
+                    &data.raw_bytes,
+                    &data.encoding,
+                );
+                for line in lines {
+                    state::push_log_bounded(&mut self.state.messages, line);
                 }
+                self.preview_decoder.clear();
+                self.state.receive_preview = self
+                    .preview_decoder
+                    .decode(self.state.receive_buffer.pending_bytes(), &data.encoding)
+                    .unwrap_or_else(|_| {
+                        state::decode_received_bytes_lossy(
+                            self.state.receive_buffer.pending_bytes(),
+                            &data.encoding,
+                        )
+                    });
+                if self.state.auto_scroll {
+                    self.log_scroll_handle.scroll_to_bottom();
+                }
+                self.state.status = "正在接收".into();
             }
             SerialEvent::Error(error) => {
                 self.state.error = Some(error.clone());
@@ -137,8 +158,10 @@ impl AppView {
                 if let Ok(mut manager) = self.manager.lock() {
                     let _ = manager.close();
                 }
+                self.flush_receive_buffer();
                 self.state.connected = false;
                 self.state.loop_send = false;
+                self.loop_generation.fetch_add(1, Ordering::AcqRel);
                 self.state.status = "设备已断开".into();
             }
         }
@@ -161,8 +184,10 @@ impl AppView {
                 .lock()
                 .map_err(|_| "串口锁已损坏".to_string())
                 .and_then(|mut m| m.close());
+            self.flush_receive_buffer();
             self.state.connected = false;
             self.state.loop_send = false;
+            self.loop_generation.fetch_add(1, Ordering::AcqRel);
             self.state.connected = self
                 .manager
                 .lock()
@@ -180,6 +205,7 @@ impl AppView {
             let manager = Arc::clone(&self.manager);
             let config = self.state.config.clone();
             let encoding = self.state.send_encoding.clone();
+            self.receive_encoding = encoding.clone();
             let events = self.events_tx.clone();
             cx.spawn(async move |this, cx| {
                 let result = manager
@@ -192,10 +218,7 @@ impl AppView {
                         Ok(()) => {
                             view.state.connected = true;
                             view.state.status = format!("已连接 · {}", view.state.config.port_name);
-                            let _ = persistence::save(&SavedSettings {
-                                port_config: view.state.config.clone(),
-                                presets: view.state.presets.clone(),
-                            });
+                            view.save_settings();
                         }
                         Err(error) => {
                             view.state.connected = false;
@@ -266,47 +289,100 @@ impl AppView {
         cx.notify();
     }
 
-    fn export_logs(&mut self, format: &str) {
-        let Some(dir) = dirs::download_dir().or_else(dirs::document_dir) else {
-            self.state.error = Some("无法定位导出目录".into());
-            return;
-        };
-        let path = match export::exporter::normalize_export_path(
-            dir.join(format!(
-                "serial-log-{}",
-                chrono::Local::now().format("%Y%m%d-%H%M%S")
-            )),
-            format,
-        ) {
-            Ok(path) => path,
-            Err(error) => {
-                self.state.error = Some(error);
-                return;
-            }
-        };
+    fn export_logs(&mut self, format: &'static str, cx: &mut Context<Self>) {
+        self.flush_receive_buffer();
         let entries = export::exporter::entries_from_messages(&self.state.messages);
-        let result = if format == "txt" {
-            export::exporter::export_txt(&entries, &path)
+        let filename = format!(
+            "serial-log-{}.{}",
+            chrono::Local::now().format("%Y%m%d-%H%M%S"),
+            format
+        );
+        let filter_name = if format == "txt" {
+            "文本文件"
         } else {
-            export::export_csv(&entries, &path)
+            "CSV 文件"
         };
-        match result {
-            Ok(()) => {
-                self.last_export = Some(path);
-                self.state.status = format!("已导出 {} 条日志", entries.len());
-            }
-            Err(e) => self.state.error = Some(e),
-        }
+        cx.spawn(async move |this, cx| {
+            let selected = rfd::AsyncFileDialog::new()
+                .set_title("导出串口日志")
+                .set_file_name(filename)
+                .add_filter(filter_name, &[format])
+                .save_file()
+                .await;
+            let Some(file) = selected else {
+                return;
+            };
+            let path = match export::exporter::normalize_export_path(file.path(), format) {
+                Ok(path) => path,
+                Err(error) => {
+                    let _ = this.update(cx, |view, cx| {
+                        view.state.error = Some(error);
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+            let result = if format == "txt" {
+                export::exporter::export_txt(&entries, &path)
+            } else {
+                export::export_csv(&entries, &path)
+            };
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok(()) => {
+                        view.last_export = Some(path);
+                        view.state.status = format!("已导出 {} 条日志", entries.len());
+                    }
+                    Err(error) => view.state.error = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        self.state.status = format!("等待选择 {format_name} 保存位置", format_name = filter_name);
     }
 
     fn clear_logs(&mut self) {
         self.state.messages.clear();
         self.state.receive_buffer.clear();
         self.state.receive_preview.clear();
-        self.stream_decoder.clear();
+        self.preview_decoder.clear();
         self.state.bytes_received = 0;
         self.state.bytes_sent = 0;
         self.state.status = "日志已清空".into();
+    }
+
+    fn flush_receive_buffer(&mut self) {
+        if !self.state.receive_buffer.has_pending() {
+            self.state.receive_buffer.clear();
+            self.state.receive_preview.clear();
+            self.preview_decoder.clear();
+            return;
+        }
+        let raw_bytes = self.state.receive_buffer.take_pending();
+        let encoding = self.receive_encoding.clone();
+        self.preview_decoder.clear();
+        let data = state::decode_received_bytes_lossy(&raw_bytes, &encoding);
+        state::push_log_bounded(
+            &mut self.state.messages,
+            state::ReceivedMessage {
+                direction: MessageDirection::Received,
+                timestamp: state::current_message_timestamp(),
+                data,
+                encoding,
+                raw_bytes,
+            },
+        );
+        self.state.receive_preview.clear();
+    }
+
+    fn save_settings(&mut self) {
+        if let Err(error) = persistence::save(&SavedSettings {
+            port_config: self.state.config.clone(),
+            presets: self.state.presets.clone(),
+        }) {
+            self.state.error = Some(error);
+        }
     }
     fn cycle_encoding(&mut self) {
         self.state.send_encoding = match self.state.send_encoding {
@@ -317,13 +393,15 @@ impl AppView {
         };
     }
     fn cycle_baud(&mut self) {
-        self.state.config.baud_rate = match self.state.config.baud_rate {
-            9_600 => 19_200,
-            19_200 => 38_400,
-            38_400 => 57_600,
-            57_600 => 115_200,
-            _ => 9_600,
-        };
+        const BAUD_RATES: &[u32] = &[
+            9_600, 19_200, 38_400, 57_600, 115_200, 230_400, 460_800, 921_600,
+        ];
+        let index = BAUD_RATES
+            .iter()
+            .position(|rate| *rate == self.state.config.baud_rate)
+            .unwrap_or(0);
+        self.state.config.baud_rate = BAUD_RATES[(index + 1) % BAUD_RATES.len()];
+        self.save_settings();
     }
     fn cycle_data_bits(&mut self) {
         self.state.config.data_bits = match self.state.config.data_bits {
@@ -332,6 +410,7 @@ impl AppView {
             7 => 8,
             _ => 5,
         };
+        self.save_settings();
     }
     fn cycle_stop_bits(&mut self) {
         self.state.config.stop_bits = if self.state.config.stop_bits == "1" {
@@ -340,6 +419,7 @@ impl AppView {
             "1"
         }
         .into();
+        self.save_settings();
     }
     fn cycle_parity(&mut self) {
         self.state.config.parity = match self.state.config.parity.as_str() {
@@ -348,6 +428,7 @@ impl AppView {
             _ => "none",
         }
         .into();
+        self.save_settings();
     }
     fn cycle_flow_control(&mut self) {
         self.state.config.flow_control = match self.state.config.flow_control.as_str() {
@@ -356,6 +437,7 @@ impl AppView {
             _ => "none",
         }
         .into();
+        self.save_settings();
     }
     fn refresh_ports(&mut self) {
         self.available_ports = SerialManager::list_ports()
@@ -363,6 +445,12 @@ impl AppView {
             .map(|port| port.port_name)
             .collect();
         self.state.status = format!("已刷新串口列表 · {} 个设备", self.available_ports.len());
+    }
+    fn select_port(&mut self, port: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.state.config.port_name = port.clone();
+        self.port_input
+            .update(cx, |input, cx| input.set_value(port, window, cx));
+        self.save_settings();
     }
     fn add_preset(&mut self, cx: &mut Context<Self>) {
         let name = self.preset_name_input.read(cx).value().to_string();
@@ -384,10 +472,7 @@ impl AppView {
                 encoding: self.state.send_encoding.clone(),
             });
         }
-        let _ = persistence::save(&SavedSettings {
-            port_config: self.state.config.clone(),
-            presets: self.state.presets.clone(),
-        });
+        self.save_settings();
     }
     fn begin_edit(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(preset) = self.state.presets.get(index).cloned() {
@@ -408,10 +493,7 @@ impl AppView {
     fn delete_preset(&mut self, index: usize) {
         if index < self.state.presets.len() {
             self.state.presets.remove(index);
-            let _ = persistence::save(&SavedSettings {
-                port_config: self.state.config.clone(),
-                presets: self.state.presets.clone(),
-            });
+            self.save_settings();
         }
     }
     fn send_preset(&mut self, preset: PresetCommand, cx: &mut Context<Self>) {
@@ -433,27 +515,35 @@ impl AppView {
                 return;
             }
         };
-        let result = self
-            .manager
-            .lock()
-            .map_err(|_| "串口锁已损坏".to_string())
-            .and_then(|mut manager| manager.send(&bytes));
-        match result {
-            Ok(written) => {
-                self.state.bytes_sent += written as u64;
-                state::push_log_bounded(
-                    &mut self.state.messages,
-                    state::sent_message(
-                        &state::current_message_timestamp(),
-                        content,
-                        preset.encoding,
-                        bytes,
-                    ),
-                );
-                self.state.status = format!("预设已发送 {written} 字节");
-            }
-            Err(error) => self.state.error = Some(error),
-        }
+        let manager = Arc::clone(&self.manager);
+        let encoding = preset.encoding;
+        self.state.status = "预设发送中…".into();
+        cx.spawn(async move |this, cx| {
+            let result = manager
+                .lock()
+                .map_err(|_| "串口锁已损坏".to_string())
+                .and_then(|mut manager| manager.send(&bytes));
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok(written) => {
+                        view.state.bytes_sent += written as u64;
+                        state::push_log_bounded(
+                            &mut view.state.messages,
+                            state::sent_message(
+                                &state::current_message_timestamp(),
+                                content,
+                                encoding,
+                                bytes,
+                            ),
+                        );
+                        view.state.status = format!("预设已发送 {written} 字节");
+                    }
+                    Err(error) => view.state.error = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
     fn toggle_loop_send(&mut self, cx: &mut Context<Self>) {
@@ -546,8 +636,22 @@ impl AppView {
                     break;
                 }
             }
+            let next_interval = this
+                .update(cx, |view, cx| {
+                    let value = view
+                        .loop_interval_input
+                        .read(cx)
+                        .value()
+                        .to_string()
+                        .parse::<u64>()
+                        .unwrap_or(view.state.loop_interval_ms);
+                    let value = state::normalize_loop_interval_ms(value);
+                    view.state.loop_interval_ms = value;
+                    value
+                })
+                .unwrap_or(interval);
             cx.background_executor()
-                .timer(Duration::from_millis(interval))
+                .timer(Duration::from_millis(next_interval))
                 .await;
         })
         .detach();
@@ -577,6 +681,20 @@ impl Render for AppView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let connected = self.state.connected;
         let available_count = self.available_ports.len();
+        let port_buttons = self
+            .available_ports
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, port)| {
+                self.button(("port", index), port.clone(), false)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.select_port(port.clone(), window, cx);
+                        cx.notify();
+                    }))
+            });
+        // Keep chronological order independent of the scroll preference; the
+        // checkbox only controls whether the viewport follows new messages.
         let messages = self
             .state
             .messages
@@ -584,6 +702,9 @@ impl Render for AppView {
             .rev()
             .take(500)
             .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
             .collect::<Vec<_>>();
         let status = self.state.status.clone();
         let error = self.state.error.clone();
@@ -631,6 +752,7 @@ impl Render for AppView {
             .on_click(cx.listener(|this, _, _, cx| this.toggle_connection(cx)));
         let send = self
             .button("send", "发送", true)
+            .disabled(!connected || self.state.connecting)
             .on_click(cx.listener(|this, _, _, cx| this.send_message(cx)));
         let clear = self
             .button("clear", "清空日志", false)
@@ -641,13 +763,13 @@ impl Render for AppView {
         let export_csv_button = self
             .button("export-csv", "导出 CSV", false)
             .on_click(cx.listener(|this, _, _, cx| {
-                this.export_logs("csv");
+                this.export_logs("csv", cx);
                 cx.notify();
             }));
         let export_txt_button = self
             .button("export-txt", "导出 TXT", false)
             .on_click(cx.listener(|this, _, _, cx| {
-                this.export_logs("txt");
+                this.export_logs("txt", cx);
                 cx.notify();
             }));
         let encoding = self
@@ -677,6 +799,7 @@ impl Render for AppView {
                 },
                 false,
             )
+            .disabled(!connected || self.state.connecting)
             .on_click(cx.listener(|this, _, _, cx| this.toggle_loop_send(cx)));
         let refresh_ports = self
             .button("refresh-ports", "刷新", false)
@@ -790,7 +913,10 @@ impl Render for AppView {
             .child(
                 div()
                     .flex_1()
-                    .overflow_y_scrollbar()
+                    .id("receive-log")
+                    .track_scroll(&self.log_scroll_handle)
+                    .overflow_y_scroll()
+                    .vertical_scrollbar(&self.log_scroll_handle)
                     .bg(crate::ui::theme::color(crate::ui::theme::CARD))
                     .border_1()
                     .border_color(crate::ui::theme::color(crate::ui::theme::BORDER))
@@ -948,6 +1074,53 @@ impl Render for AppView {
         } else {
             manager_content
         };
+        let sidebar = div().w(px(255.)).flex().flex_col().gap_3().child(
+            crate::ui::components::card()
+                .child(crate::ui::components::label("连接配置"))
+                .child(port_input)
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(crate::ui::theme::color(crate::ui::theme::MUTED))
+                        .child(format!("发现 {available_count} 个串口设备")),
+                )
+                .child(div().flex().flex_wrap().gap_2().children(port_buttons))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(crate::ui::components::label(format!(
+                            "波特率：{}",
+                            self.state.config.baud_rate
+                        )))
+                        .child(self.button("baud", "切换", false).on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.cycle_baud();
+                                cx.notify();
+                            },
+                        ))),
+                )
+                .child(div().flex().gap_2().child(data_bits).child(stop_bits))
+                .child(div().flex().gap_2().child(parity).child(flow))
+                .child(refresh_ports)
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(crate::ui::theme::color(crate::ui::theme::MUTED))
+                        .child("连接前可切换完整串口参数"),
+                )
+                .child(
+                    div()
+                        .mt_3()
+                        .text_xs()
+                        .text_color(crate::ui::theme::color(crate::ui::theme::MUTED))
+                        .child(format!(
+                            "接收 {} B · 发送 {} B",
+                            self.state.bytes_received, self.state.bytes_sent
+                        )),
+                ),
+        );
         div()
             .size_full()
             .bg(crate::ui::theme::color(crate::ui::theme::BACKGROUND))
@@ -1017,66 +1190,13 @@ impl Render for AppView {
                     ),
             )
             .child(
-                div().flex_1().p_5().gap_4().flex().child(
-                    div()
-                        .w(px(255.))
-                        .flex()
-                        .flex_col()
-                        .gap_3()
-                        .child(
-                            crate::ui::components::card()
-                                .child(crate::ui::components::label("连接配置"))
-                                .child(port_input)
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(crate::ui::theme::color(
-                                            crate::ui::theme::MUTED,
-                                        ))
-                                        .child(format!("发现 {available_count} 个串口设备")),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .child(crate::ui::components::label(format!(
-                                            "波特率：{}",
-                                            self.state.config.baud_rate
-                                        )))
-                                        .child(self.button("baud", "切换", false).on_click(
-                                            cx.listener(|this, _, _, cx| {
-                                                this.cycle_baud();
-                                                cx.notify();
-                                            }),
-                                        )),
-                                )
-                                .child(div().flex().gap_2().child(data_bits).child(stop_bits))
-                                .child(div().flex().gap_2().child(parity).child(flow))
-                                .child(refresh_ports)
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(crate::ui::theme::color(
-                                            crate::ui::theme::MUTED,
-                                        ))
-                                        .child("连接前可切换完整串口参数"),
-                                )
-                                .child(
-                                    div()
-                                        .mt_3()
-                                        .text_xs()
-                                        .text_color(crate::ui::theme::color(
-                                            crate::ui::theme::MUTED,
-                                        ))
-                                        .child(format!(
-                                            "接收 {} B · 发送 {} B",
-                                            self.state.bytes_received, self.state.bytes_sent
-                                        )),
-                                ),
-                        )
-                        .child(main_content),
-                ),
+                div()
+                    .flex_1()
+                    .p_5()
+                    .gap_4()
+                    .flex()
+                    .child(sidebar)
+                    .child(main_content),
             )
             .child(
                 div()

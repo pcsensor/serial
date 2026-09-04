@@ -20,7 +20,7 @@
 | 原生控件 | [gpui-component 0.5.1](https://github.com/longbridge/gpui-component) |
 | 串口驱动 | [serialport 4.x](https://crates.io/crates/serialport) |
 | 编码转换 | [encoding_rs](https://crates.io/crates/encoding_rs) |
-| 配置与导出 | serde、serde_json、csv、dirs |
+| 配置与导出 | serde、serde_json、csv、dirs、rfd（系统保存对话框） |
 
 ## 项目结构
 
@@ -56,7 +56,7 @@ cargo fmt --all -- --check
 cargo clippy --locked --all-targets -- -D warnings
 ```
 
-应用配置保存在系统配置目录的 `serial-debugger/settings.json`；导出文件默认写入下载目录（不可用时回退到文档目录）。
+应用配置保存在系统配置目录的 `serial-debugger/settings.json`；点击导出时可在系统保存对话框中选择目标路径。
 
 ## 分支
 

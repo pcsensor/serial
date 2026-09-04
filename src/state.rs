@@ -75,55 +75,140 @@ fn default_direction() -> MessageDirection {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReceiveLineBuffer {
     pending: String,
+    raw_pending: Vec<u8>,
     skip_next_lf: bool,
 }
+
+/// Maximum bytes retained for a line that has not received a CR/LF yet. A
+/// device streaming binary data without line endings is segmented instead of
+/// growing memory without bound.
+pub const MAX_PENDING_RECEIVE_BYTES: usize = 64 * 1024;
 
 impl ReceiveLineBuffer {
     pub fn clear(&mut self) {
         self.pending.clear();
+        self.raw_pending.clear();
         self.skip_next_lf = false;
     }
+    #[allow(dead_code)]
     pub fn pending(&self) -> &str {
         &self.pending
     }
+    pub fn pending_bytes(&self) -> &[u8] {
+        &self.raw_pending
+    }
+    pub fn has_pending(&self) -> bool {
+        !self.raw_pending.is_empty()
+    }
+    pub fn take_pending(&mut self) -> Vec<u8> {
+        self.pending.clear();
+        self.skip_next_lf = false;
+        std::mem::take(&mut self.raw_pending)
+    }
+
+    fn append(&mut self, byte: u8) {
+        self.raw_pending.push(byte);
+    }
+
+    fn take(&mut self, encoding: &Encoding) -> (String, Vec<u8>) {
+        let raw = std::mem::take(&mut self.raw_pending);
+        let text = decode_received_bytes_lossy(&raw, encoding);
+        self.pending.clear();
+        (text, raw)
+    }
+}
+
+/// Decode received bytes for display, retaining raw bytes separately for HEX
+/// mode and exports. Lossy conversion keeps malformed or incomplete input
+/// visible instead of dropping it or poisoning the stream buffer.
+pub fn decode_received_bytes_lossy(bytes: &[u8], encoding: &Encoding) -> String {
+    match encoding {
+        Encoding::Ascii => bytes
+            .iter()
+            .map(|byte| {
+                if *byte <= 0x7f {
+                    *byte as char
+                } else {
+                    '\u{FFFD}'
+                }
+            })
+            .collect(),
+        Encoding::Hex => format_hex_bytes(bytes),
+        Encoding::Utf8 => String::from_utf8_lossy(bytes).into_owned(),
+        Encoding::Gbk => encoding_rs::GBK.decode(bytes).0.into_owned(),
+    }
+}
+
+/// Split raw serial input on CR/LF boundaries while preserving the exact
+/// bytes for each complete message. CRLF spanning two reads is treated as one
+/// delimiter; an incomplete trailing line remains in `buffer`.
+pub fn split_received_data_lines(
+    buffer: &mut ReceiveLineBuffer,
+    timestamp: &str,
+    raw_bytes: &[u8],
+    encoding: &Encoding,
+) -> Vec<ReceivedMessage> {
+    let mut lines = Vec::new();
+    for &byte in raw_bytes {
+        if buffer.skip_next_lf {
+            buffer.skip_next_lf = false;
+            if byte == b'\n' {
+                continue;
+            }
+        }
+        match byte {
+            b'\r' => {
+                let (data, raw_bytes) = buffer.take(encoding);
+                lines.push(ReceivedMessage {
+                    direction: MessageDirection::Received,
+                    timestamp: timestamp.to_owned(),
+                    data,
+                    encoding: encoding.clone(),
+                    raw_bytes,
+                });
+                buffer.skip_next_lf = true;
+            }
+            b'\n' => {
+                let (data, raw_bytes) = buffer.take(encoding);
+                lines.push(ReceivedMessage {
+                    direction: MessageDirection::Received,
+                    timestamp: timestamp.to_owned(),
+                    data,
+                    encoding: encoding.clone(),
+                    raw_bytes,
+                });
+            }
+            byte => {
+                buffer.append(byte);
+                if buffer.raw_pending.len() >= MAX_PENDING_RECEIVE_BYTES {
+                    let (data, raw_bytes) = buffer.take(encoding);
+                    lines.push(ReceivedMessage {
+                        direction: MessageDirection::Received,
+                        timestamp: timestamp.to_owned(),
+                        data,
+                        encoding: encoding.clone(),
+                        raw_bytes,
+                    });
+                }
+            }
+        }
+    }
+    buffer.pending = decode_received_bytes_lossy(&buffer.raw_pending, encoding);
+    lines
 }
 
 /// Split a stream into lines while retaining incomplete data for the next read.
+#[allow(dead_code)]
 pub fn split_received_message_lines(
     buffer: &mut ReceiveLineBuffer,
     message: ReceivedMessage,
 ) -> Vec<ReceivedMessage> {
-    let mut lines = Vec::new();
-    for ch in message.data.chars() {
-        if buffer.skip_next_lf {
-            buffer.skip_next_lf = false;
-            if ch == '\n' {
-                continue;
-            }
-        }
-        match ch {
-            '\r' => {
-                lines.push(received_line_from_buffer(buffer, &message));
-                buffer.skip_next_lf = true;
-            }
-            '\n' => lines.push(received_line_from_buffer(buffer, &message)),
-            _ => buffer.pending.push(ch),
-        }
-    }
-    lines
-}
-
-fn received_line_from_buffer(
-    buffer: &mut ReceiveLineBuffer,
-    message: &ReceivedMessage,
-) -> ReceivedMessage {
-    ReceivedMessage {
-        direction: MessageDirection::Received,
-        timestamp: message.timestamp.clone(),
-        data: std::mem::take(&mut buffer.pending),
-        encoding: message.encoding.clone(),
-        raw_bytes: Vec::new(),
-    }
+    let bytes = if message.raw_bytes.is_empty() {
+        message.data.as_bytes().to_vec()
+    } else {
+        message.raw_bytes
+    };
+    split_received_data_lines(buffer, &message.timestamp, &bytes, &message.encoding)
 }
 
 pub fn apply_send_line_ending(
@@ -326,34 +411,57 @@ mod tests {
     #[test]
     fn split_keeps_partial_lines() {
         let mut b = ReceiveLineBuffer::default();
-        assert!(split_received_message_lines(
-            &mut b,
-            ReceivedMessage {
-                direction: MessageDirection::Received,
-                timestamp: "t".into(),
-                data: "hello".into(),
-                encoding: Encoding::Ascii,
-                raw_bytes: vec![]
-            }
-        )
-        .is_empty());
+        assert!(split_received_data_lines(&mut b, "t", b"hello", &Encoding::Ascii).is_empty());
         assert_eq!(b.pending(), "hello");
     }
     #[test]
     fn crlf_is_single_break() {
         let mut b = ReceiveLineBuffer::default();
-        let m = ReceivedMessage {
-            direction: MessageDirection::Received,
-            timestamp: "t".into(),
-            data: "a\r\nb\n".into(),
-            encoding: Encoding::Ascii,
-            raw_bytes: vec![],
-        };
-        let out = split_received_message_lines(&mut b, m);
+        let out = split_received_data_lines(&mut b, "t", b"a\r\nb\n", &Encoding::Ascii);
         assert_eq!(
             out.iter().map(|m| m.data.as_str()).collect::<Vec<_>>(),
             ["a", "b"]
         );
+        assert_eq!(out[0].raw_bytes, b"a");
+    }
+
+    #[test]
+    fn raw_hex_input_is_framed_before_display_decoding() {
+        let mut b = ReceiveLineBuffer::default();
+        let out = split_received_data_lines(&mut b, "t", &[0x41, 0x0d, 0x0a], &Encoding::Hex);
+        assert_eq!(out[0].data, "41");
+        assert_eq!(out[0].raw_bytes, vec![0x41]);
+    }
+
+    #[test]
+    fn crlf_split_across_reads_keeps_following_data() {
+        let mut b = ReceiveLineBuffer::default();
+        assert_eq!(
+            split_received_data_lines(&mut b, "t", b"first\r", &Encoding::Utf8)
+                .pop()
+                .unwrap()
+                .data,
+            "first"
+        );
+        let out = split_received_data_lines(&mut b, "t", b"\nsecond\n", &Encoding::Utf8);
+        assert_eq!(
+            out.iter().map(|m| m.data.as_str()).collect::<Vec<_>>(),
+            ["second"]
+        );
+    }
+
+    #[test]
+    fn unterminated_input_is_segmented_at_the_pending_limit() {
+        let mut b = ReceiveLineBuffer::default();
+        let out = split_received_data_lines(
+            &mut b,
+            "t",
+            &vec![b'x'; MAX_PENDING_RECEIVE_BYTES + 1],
+            &Encoding::Ascii,
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].raw_bytes.len(), MAX_PENDING_RECEIVE_BYTES);
+        assert_eq!(b.pending_bytes().len(), 1);
     }
     #[test]
     fn hex_ending_is_valid() {

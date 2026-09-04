@@ -1,6 +1,6 @@
 use super::protocol::{ReceivedData, SerialEvent};
 use crate::state::{Encoding, PortConfig};
-use async_channel::Sender;
+use async_channel::{Sender, TrySendError};
 use serialport::{self, ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits};
 use std::{
     io::{Read, Write},
@@ -14,6 +14,29 @@ use std::{
 
 const READ_TIMEOUT: Duration = Duration::from_millis(100);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Send through the bounded UI queue without making shutdown wait forever.
+/// The retry loop applies backpressure while connected, but the stop flag
+/// interrupts it as soon as `close` starts joining the reader thread.
+fn send_event_cancellable(
+    sender: &Sender<SerialEvent>,
+    mut event: SerialEvent,
+    stop: &AtomicBool,
+) -> bool {
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return false;
+        }
+        match sender.try_send(event) {
+            Ok(()) => return true,
+            Err(TrySendError::Closed(_)) => return false,
+            Err(TrySendError::Full(next)) => {
+                event = next;
+                thread::sleep(Duration::from_millis(2));
+            }
+        }
+    }
+}
 
 pub struct SerialManager {
     port: Option<Box<dyn SerialPort>>,
@@ -95,11 +118,17 @@ impl SerialManager {
             while !thread_stop.load(Ordering::Acquire) {
                 match reader.read(&mut buffer) {
                     Ok(n) if n > 0 => {
-                        let _ = thread_events.send_blocking(SerialEvent::Data(ReceivedData {
-                            timestamp: crate::state::current_message_timestamp(),
-                            raw_bytes: buffer[..n].to_vec(),
-                            encoding: encoding.clone(),
-                        }));
+                        if !send_event_cancellable(
+                            &thread_events,
+                            SerialEvent::Data(ReceivedData {
+                                timestamp: crate::state::current_message_timestamp(),
+                                raw_bytes: buffer[..n].to_vec(),
+                                encoding: encoding.clone(),
+                            }),
+                            &thread_stop,
+                        ) {
+                            break;
+                        }
                     }
                     Ok(_) => {}
                     Err(e)
@@ -110,9 +139,16 @@ impl SerialManager {
                                 | std::io::ErrorKind::Interrupted
                         ) => {}
                     Err(e) => {
-                        let _ = thread_events
-                            .send_blocking(SerialEvent::Error(format!("读取串口失败: {e}")));
-                        let _ = thread_events.send_blocking(SerialEvent::Disconnected);
+                        let _ = send_event_cancellable(
+                            &thread_events,
+                            SerialEvent::Error(format!("读取串口失败: {e}")),
+                            &thread_stop,
+                        );
+                        let _ = send_event_cancellable(
+                            &thread_events,
+                            SerialEvent::Disconnected,
+                            &thread_stop,
+                        );
                         break;
                     }
                 }
