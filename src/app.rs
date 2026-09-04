@@ -134,6 +134,9 @@ impl AppView {
                 self.state.status = error;
             }
             SerialEvent::Disconnected => {
+                if let Ok(mut manager) = self.manager.lock() {
+                    let _ = manager.close();
+                }
                 self.state.connected = false;
                 self.state.loop_send = false;
                 self.state.status = "设备已断开".into();
