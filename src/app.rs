@@ -38,6 +38,7 @@ pub struct AppView {
     preset_content_input: Entity<InputState>,
     loop_interval_input: Entity<InputState>,
     loop_generation: Arc<AtomicU64>,
+    editing_preset: Option<usize>,
     last_export: Option<PathBuf>,
 }
 
@@ -94,6 +95,7 @@ impl AppView {
             preset_content_input,
             loop_interval_input,
             loop_generation: Arc::new(AtomicU64::new(0)),
+            editing_preset: None,
             last_export: None,
         }
     }
@@ -365,16 +367,40 @@ impl AppView {
         if name.trim().is_empty() || content.is_empty() {
             return;
         }
-        self.state.presets.push(PresetCommand {
-            id: state::new_preset_command_id(),
-            name,
-            content,
-            encoding: self.state.send_encoding.clone(),
-        });
+        if let Some(index) = self.editing_preset.take() {
+            if let Some(preset) = self.state.presets.get_mut(index) {
+                preset.name = name;
+                preset.content = content;
+                preset.encoding = self.state.send_encoding.clone();
+            }
+        } else {
+            self.state.presets.push(PresetCommand {
+                id: state::new_preset_command_id(),
+                name,
+                content,
+                encoding: self.state.send_encoding.clone(),
+            });
+        }
         let _ = persistence::save(&SavedSettings {
             port_config: self.state.config.clone(),
             presets: self.state.presets.clone(),
         });
+    }
+    fn begin_edit(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(preset) = self.state.presets.get(index).cloned() {
+            self.editing_preset = Some(index);
+            self.send_encoding_for_edit(preset.encoding.clone());
+            self.preset_name_input
+                .update(cx, |input, cx| input.set_value(preset.name, window, cx));
+            self.preset_content_input
+                .update(cx, |input, cx| input.set_value(preset.content, window, cx));
+        }
+    }
+    fn send_encoding_for_edit(&mut self, encoding: Encoding) {
+        self.state.send_encoding = encoding;
+    }
+    fn cancel_edit(&mut self) {
+        self.editing_preset = None;
     }
     fn delete_preset(&mut self, index: usize) {
         if index < self.state.presets.len() {
@@ -860,6 +886,12 @@ impl Render for AppView {
                                 this.send_preset(item.clone(), cx)
                             })),
                     )
+                    .child(self.button(("preset-edit", index), "编辑", false).on_click(
+                        cx.listener(move |this, _, window, cx| {
+                            this.begin_edit(index, window, cx);
+                            cx.notify();
+                        }),
+                    ))
                     .child(
                         self.button(("preset-delete", index), "删除", false)
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -868,6 +900,17 @@ impl Render for AppView {
                             })),
                     )
             });
+        let save_label = if self.editing_preset.is_some() {
+            "更新命令"
+        } else {
+            "保存命令"
+        };
+        let cancel_edit = self
+            .button("cancel-edit", "取消", false)
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.cancel_edit();
+                cx.notify();
+            }));
         let manager_content = div()
             .flex_1()
             .flex()
@@ -886,12 +929,15 @@ impl Render for AppView {
                     .child(Input::new(&self.preset_name_input))
                     .child(Input::new(&self.preset_content_input).flex_1())
                     .child(
-                        self.button("add-preset", "保存命令", true)
+                        self.button("add-preset", save_label, true)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.add_preset(cx);
                                 cx.notify();
                             })),
-                    ),
+                    )
+                    .when(self.editing_preset.is_some(), |this| {
+                        this.child(cancel_edit)
+                    }),
             )
             .child(div().flex().flex_wrap().gap_2().children(presets));
         let main_content = if tab == ActiveTab::ReceiveSend {
