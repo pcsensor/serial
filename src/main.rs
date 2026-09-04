@@ -16,7 +16,10 @@ fn main() {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            |window, cx| cx.new(|cx| app::AppView::new(window, cx)),
+            |window, cx| {
+                let view = cx.new(|cx| app::AppView::new(window, cx));
+                cx.new(|cx| gpui_component::Root::new(view, window, cx))
+            },
         )
         .expect("failed to open the main window");
 
