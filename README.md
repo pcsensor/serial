@@ -1,12 +1,13 @@
 # 串口调试助手
 
-一个纯 Rust / GPUI 的跨平台串口调试工具。UI 使用 GPUI 原生渲染，搭配 `gpui-component`，采用现代化浅色扁平卡片设计，不依赖 WebView、Dioxus 或 Tauri。
+一个纯 Rust / GPUI 的跨平台串口调试工具。UI 使用 GPUI 原生渲染，搭配 `gpui-component`，采用高对比、强层级的新野兽主义工作台设计，不依赖 WebView、Dioxus 或 Tauri。
 
 ## 功能
 
 - 枚举并连接串口，支持波特率、数据位、停止位、校验位与流控配置
 - ASCII、HEX、UTF-8、GBK 编码收发，支持 CR / LF / CRLF 行尾
 - 实时接收日志、发送回显、HEX 显示、自动滚动与统计字节数
+- 连接台通过顶部按钮打开悬浮弹窗，不占用日志区；点击“专注日志”可进一步收起发送区，点击“退出专注”恢复
 - 循环发送（可配置毫秒间隔，使用代际令牌安全停止）
 - 命令预设的保存、加载与 JSON 持久化
 - TXT / CSV 导出（CSV 使用标准 quoting，并带 UTF-8 BOM，兼容 Excel）
@@ -28,6 +29,8 @@
 src/
 ├── main.rs                 # GPUI 应用入口
 ├── app.rs                  # 根视图、交互和生命周期
+├── app/
+│   └── view.rs             # 新野兽主义界面与工作区结构
 ├── state.rs                # 可测试的领域状态与日志规则
 ├── serial/
 │   ├── manager.rs           # 串口打开、接收线程、限时发送、清理
@@ -37,8 +40,8 @@ src/
 │   ├── exporter.rs          # TXT / CSV 导出
 │   └── persistence.rs       # 原子化配置与预设持久化
 └── ui/
-    ├── theme.rs             # 浅色扁平主题色
-    └── components.rs        # 通用卡片和标签
+    ├── theme.rs             # 新野兽主义语义色与原生控件主题
+    └── components.rs        # 面板、徽章、标签与按钮变体
 ```
 
 ## 环境要求
@@ -49,7 +52,7 @@ src/
 ## 开发与构建
 
 ```bash
-cargo run
+cargo run --locked
 cargo check --locked
 cargo test --all-targets --locked
 cargo fmt --all -- --check

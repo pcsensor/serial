@@ -4,20 +4,11 @@ use crate::{
         persistence::{self, SavedSettings},
     },
     serial::{encoding, manager::SerialManager, protocol::SerialEvent},
-    state::{self, ActiveTab, AppState, Encoding, MessageDirection, PresetCommand, SendLineEnding},
+    state::{self, ActiveTab, AppState, Encoding, MessageDirection, PresetCommand},
 };
 use async_channel::Sender;
-use gpui::{
-    div, prelude::*, px, Context, ElementId, Entity, IntoElement, Render, ScrollHandle,
-    SharedString, StatefulInteractiveElement, Subscription, Window,
-};
-use gpui_component::{
-    button::{Button, ButtonVariants},
-    checkbox::Checkbox,
-    input::{Input, InputState},
-    scroll::ScrollableElement,
-    Disableable,
-};
+use gpui::{prelude::*, Context, Entity, ScrollHandle, Subscription, Window};
+use gpui_component::input::InputState;
 use std::{
     path::PathBuf,
     sync::{
@@ -27,11 +18,14 @@ use std::{
     time::Duration,
 };
 
+mod view;
+
 pub struct AppView {
     state: AppState,
     manager: Arc<Mutex<SerialManager>>,
     events_tx: Sender<SerialEvent>,
     receive_encoding: Encoding,
+    preset_encoding: Encoding,
     preview_decoder: crate::serial::encoding::StreamDecoder,
     available_ports: Vec<String>,
     port_input: Entity<InputState>,
@@ -41,8 +35,13 @@ pub struct AppView {
     loop_interval_input: Entity<InputState>,
     loop_generation: Arc<AtomicU64>,
     log_scroll_handle: ScrollHandle,
+    port_scroll_handle: ScrollHandle,
+    preset_scroll_handle: ScrollHandle,
     _port_input_subscription: Subscription,
-    editing_preset: Option<usize>,
+    editing_preset: Option<String>,
+    pending_delete: Option<String>,
+    confirm_clear: bool,
+    log_focused: bool,
     last_export: Option<PathBuf>,
 }
 
@@ -69,13 +68,21 @@ impl AppView {
                 .placeholder("COM3 / /dev/ttyUSB0")
                 .default_value(settings.port_config.port_name)
         });
-        let send_input = cx.new(|cx| InputState::new(window, cx).multi_line(true));
+        let send_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("输入发送内容…")
+                .multi_line(true)
+        });
         let preset_name_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("命令名称")
                 .default_value("新命令")
         });
-        let preset_content_input = cx.new(|cx| InputState::new(window, cx).placeholder("命令内容"));
+        let preset_content_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("命令内容")
+                .multi_line(true)
+        });
         let loop_interval_input = cx.new(|cx| InputState::new(window, cx).default_value("1000"));
         let port_input_subscription = cx.subscribe(
             &port_input,
@@ -106,6 +113,7 @@ impl AppView {
             manager,
             events_tx,
             receive_encoding: Encoding::default(),
+            preset_encoding: Encoding::default(),
             preview_decoder: crate::serial::encoding::StreamDecoder::default(),
             available_ports,
             port_input,
@@ -115,8 +123,13 @@ impl AppView {
             loop_interval_input,
             loop_generation: Arc::new(AtomicU64::new(0)),
             log_scroll_handle: ScrollHandle::new(),
+            port_scroll_handle: ScrollHandle::new(),
+            preset_scroll_handle: ScrollHandle::new(),
             _port_input_subscription: port_input_subscription,
             editing_preset: None,
+            pending_delete: None,
+            confirm_clear: false,
+            log_focused: false,
             last_export: None,
         }
     }
@@ -198,6 +211,7 @@ impl AppView {
             self.sync_config_from_input(cx);
             if self.state.config.port_name.is_empty() {
                 self.state.error = Some("请先填写串口名称".into());
+                cx.notify();
                 return;
             }
             self.state.connecting = true;
@@ -452,48 +466,92 @@ impl AppView {
             .update(cx, |input, cx| input.set_value(port, window, cx));
         self.save_settings();
     }
-    fn add_preset(&mut self, cx: &mut Context<Self>) {
+    fn add_preset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let name = self.preset_name_input.read(cx).value().to_string();
         let content = self.preset_content_input.read(cx).value().to_string();
         if name.trim().is_empty() || content.is_empty() {
+            self.state.error = Some("命令名称和内容都不能为空".into());
             return;
         }
-        if let Some(index) = self.editing_preset.take() {
-            if let Some(preset) = self.state.presets.get_mut(index) {
-                preset.name = name;
+        let was_editing = self.editing_preset.is_some();
+        if let Some(id) = self.editing_preset.take() {
+            if let Some(preset) = self.state.presets.iter_mut().find(|preset| preset.id == id) {
+                preset.name = name.trim().to_owned();
                 preset.content = content;
-                preset.encoding = self.state.send_encoding.clone();
+                preset.encoding = self.preset_encoding.clone();
+            } else {
+                self.state.error = Some("要编辑的命令已不存在".into());
+                return;
             }
         } else {
             self.state.presets.push(PresetCommand {
                 id: state::new_preset_command_id(),
-                name,
+                name: name.trim().to_owned(),
                 content,
-                encoding: self.state.send_encoding.clone(),
+                encoding: self.preset_encoding.clone(),
             });
         }
-        self.save_settings();
-    }
-    fn begin_edit(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(preset) = self.state.presets.get(index).cloned() {
-            self.editing_preset = Some(index);
-            self.send_encoding_for_edit(preset.encoding.clone());
-            self.preset_name_input
-                .update(cx, |input, cx| input.set_value(preset.name, window, cx));
-            self.preset_content_input
-                .update(cx, |input, cx| input.set_value(preset.content, window, cx));
+        if self.state.error.as_deref() == Some("命令名称和内容都不能为空") {
+            self.state.error = None;
         }
+        self.state.status = if was_editing {
+            "命令已更新".into()
+        } else {
+            "命令已保存".into()
+        };
+        self.save_settings();
+        self.preset_name_input
+            .update(cx, |input, cx| input.set_value("新命令", window, cx));
+        self.preset_content_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
     }
-    fn send_encoding_for_edit(&mut self, encoding: Encoding) {
-        self.state.send_encoding = encoding;
+    fn begin_edit(&mut self, preset: PresetCommand, window: &mut Window, cx: &mut Context<Self>) {
+        self.editing_preset = Some(preset.id);
+        self.pending_delete = None;
+        self.preset_encoding = preset.encoding.clone();
+        self.preset_name_input
+            .update(cx, |input, cx| input.set_value(preset.name, window, cx));
+        self.preset_content_input
+            .update(cx, |input, cx| input.set_value(preset.content, window, cx));
+        self.state.status = "正在编辑命令".into();
     }
-    fn cancel_edit(&mut self) {
+    fn cycle_preset_encoding(&mut self) {
+        self.preset_encoding = match self.preset_encoding {
+            Encoding::Ascii => Encoding::Hex,
+            Encoding::Hex => Encoding::Utf8,
+            Encoding::Utf8 => Encoding::Gbk,
+            Encoding::Gbk => Encoding::Ascii,
+        };
+    }
+    fn cancel_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.editing_preset = None;
+        self.preset_name_input
+            .update(cx, |input, cx| input.set_value("新命令", window, cx));
+        self.preset_content_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.state.status = "已取消编辑".into();
     }
-    fn delete_preset(&mut self, index: usize) {
-        if index < self.state.presets.len() {
-            self.state.presets.remove(index);
+    fn confirm_or_request_delete(
+        &mut self,
+        id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pending_delete.as_deref() == Some(id.as_str()) {
+            self.state.presets.retain(|preset| preset.id != id);
+            if self.editing_preset.as_deref() == Some(id.as_str()) {
+                self.editing_preset = None;
+                self.preset_name_input
+                    .update(cx, |input, cx| input.set_value("新命令", window, cx));
+                self.preset_content_input
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+            }
+            self.pending_delete = None;
+            self.state.status = "命令已删除".into();
             self.save_settings();
+        } else {
+            self.pending_delete = Some(id);
+            self.state.status = "再次点击“确认删除”完成操作".into();
         }
     }
     fn send_preset(&mut self, preset: PresetCommand, cx: &mut Context<Self>) {
@@ -657,563 +715,13 @@ impl AppView {
         .detach();
         cx.notify();
     }
-    fn use_preset(&mut self, content: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn use_preset(&mut self, preset: PresetCommand, window: &mut Window, cx: &mut Context<Self>) {
+        let name = preset.name.clone();
         self.send_input
-            .update(cx, |input, cx| input.set_value(content, window, cx));
+            .update(cx, |input, cx| input.set_value(preset.content, window, cx));
+        self.state.send_encoding = preset.encoding;
         self.state.active_tab = ActiveTab::ReceiveSend;
-    }
-    fn button(
-        &self,
-        id: impl Into<ElementId>,
-        label: impl Into<SharedString>,
-        primary: bool,
-    ) -> Button {
-        let button = Button::new(id).label(label);
-        if primary {
-            button.primary()
-        } else {
-            button
-        }
-    }
-}
-
-impl Render for AppView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let connected = self.state.connected;
-        let available_count = self.available_ports.len();
-        let port_buttons = self
-            .available_ports
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(index, port)| {
-                self.button(("port", index), port.clone(), false)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.select_port(port.clone(), window, cx);
-                        cx.notify();
-                    }))
-            });
-        // Keep chronological order independent of the scroll preference; the
-        // checkbox only controls whether the viewport follows new messages.
-        let messages = self
-            .state
-            .messages
-            .iter()
-            .rev()
-            .take(500)
-            .cloned()
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect::<Vec<_>>();
-        let status = self.state.status.clone();
-        let error = self.state.error.clone();
-        let tab = self.state.active_tab;
-        let connect_label = if self.state.connecting {
-            "连接中…"
-        } else if connected {
-            "断开串口"
-        } else {
-            "连接串口"
-        };
-        let encoding_label = format!(
-            "发送编码：{}",
-            match self.state.send_encoding {
-                Encoding::Ascii => "ASCII",
-                Encoding::Hex => "HEX",
-                Encoding::Utf8 => "UTF-8",
-                Encoding::Gbk => "GBK",
-            }
-        );
-        let ending_label = format!(
-            "行尾：{}",
-            match self.state.send_line_ending {
-                SendLineEnding::None => "无",
-                SendLineEnding::Cr => "CR",
-                SendLineEnding::Lf => "LF",
-                SendLineEnding::Crlf => "CRLF",
-            }
-        );
-        let receive_tab = self
-            .button("tab-receive", "收发终端", false)
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.state.active_tab = ActiveTab::ReceiveSend;
-                cx.notify();
-            }));
-        let manager_tab = self
-            .button("tab-manager", "命令管理", false)
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.state.active_tab = ActiveTab::CommandManager;
-                cx.notify();
-            }));
-        let connect = self
-            .button("connect", connect_label, true)
-            .disabled(self.state.connecting)
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_connection(cx)));
-        let send = self
-            .button("send", "发送", true)
-            .disabled(!connected || self.state.connecting)
-            .on_click(cx.listener(|this, _, _, cx| this.send_message(cx)));
-        let clear = self
-            .button("clear", "清空日志", false)
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.clear_logs();
-                cx.notify();
-            }));
-        let export_csv_button = self
-            .button("export-csv", "导出 CSV", false)
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.export_logs("csv", cx);
-                cx.notify();
-            }));
-        let export_txt_button = self
-            .button("export-txt", "导出 TXT", false)
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.export_logs("txt", cx);
-                cx.notify();
-            }));
-        let encoding = self
-            .button("encoding", encoding_label, false)
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.cycle_encoding();
-                cx.notify();
-            }));
-        let ending = self
-            .button("ending", ending_label, false)
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.state.send_line_ending = match this.state.send_line_ending {
-                    SendLineEnding::None => SendLineEnding::Cr,
-                    SendLineEnding::Cr => SendLineEnding::Lf,
-                    SendLineEnding::Lf => SendLineEnding::Crlf,
-                    SendLineEnding::Crlf => SendLineEnding::None,
-                };
-                cx.notify();
-            }));
-        let loop_button = self
-            .button(
-                "loop",
-                if self.state.loop_send {
-                    "停止循环"
-                } else {
-                    "循环发送"
-                },
-                false,
-            )
-            .disabled(!connected || self.state.connecting)
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_loop_send(cx)));
-        let refresh_ports = self
-            .button("refresh-ports", "刷新", false)
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.refresh_ports();
-                cx.notify();
-            }));
-        let data_bits = self
-            .button(
-                "data-bits",
-                format!("数据位 {}", self.state.config.data_bits),
-                false,
-            )
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.cycle_data_bits();
-                cx.notify();
-            }));
-        let stop_bits = self
-            .button(
-                "stop-bits",
-                format!("停止位 {}", self.state.config.stop_bits),
-                false,
-            )
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.cycle_stop_bits();
-                cx.notify();
-            }));
-        let parity = self
-            .button(
-                "parity",
-                format!("校验 {}", self.state.config.parity),
-                false,
-            )
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.cycle_parity();
-                cx.notify();
-            }));
-        let flow = self
-            .button(
-                "flow",
-                format!("流控 {}", self.state.config.flow_control),
-                false,
-            )
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.cycle_flow_control();
-                cx.notify();
-            }));
-        let log_children = messages.into_iter().map(|message| {
-            let received = message.direction == MessageDirection::Received;
-            let direction = if received { "← 收到" } else { "→ 发送" };
-            let timestamp = message.timestamp.clone();
-            div()
-                .flex()
-                .gap_3()
-                .py_2()
-                .border_b_1()
-                .border_color(crate::ui::theme::color(crate::ui::theme::BORDER))
-                .child(
-                    div()
-                        .w(px(86.))
-                        .text_xs()
-                        .text_color(crate::ui::theme::color(crate::ui::theme::MUTED))
-                        .child(timestamp),
-                )
-                .child(
-                    div()
-                        .w(px(58.))
-                        .text_sm()
-                        .text_color(crate::ui::theme::color(if received {
-                            crate::ui::theme::PRIMARY_DARK
-                        } else {
-                            crate::ui::theme::MUTED
-                        }))
-                        .child(direction),
-                )
-                .child(div().flex_1().font_family("monospace").child(
-                    state::format_message_display(&message, self.state.hex_display),
-                ))
-        });
-        let port_input = Input::new(&self.port_input);
-        let send_input = Input::new(&self.send_input).appearance(false).h_full();
-        let receive_content = div()
-            .flex_1()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(div().flex().gap_2().child(receive_tab).child(manager_tab))
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(
-                                Checkbox::new("hex")
-                                    .label("HEX 显示")
-                                    .checked(self.state.hex_display)
-                                    .on_click(cx.listener(|this, checked, _, cx| {
-                                        this.state.hex_display = *checked;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(clear)
-                            .child(export_csv_button)
-                            .child(export_txt_button),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .id("receive-log")
-                    .track_scroll(&self.log_scroll_handle)
-                    .overflow_y_scroll()
-                    .vertical_scrollbar(&self.log_scroll_handle)
-                    .bg(crate::ui::theme::color(crate::ui::theme::CARD))
-                    .border_1()
-                    .border_color(crate::ui::theme::color(crate::ui::theme::BORDER))
-                    .rounded_lg()
-                    .p_3()
-                    .children(log_children),
-            )
-            .child(if self.state.receive_preview.is_empty() {
-                div().h(px(0.))
-            } else {
-                div()
-                    .text_xs()
-                    .text_color(crate::ui::theme::color(crate::ui::theme::MUTED))
-                    .child(format!(
-                        "未完成行：{}",
-                        state::visualize_serial_data(&self.state.receive_preview)
-                    ))
-            })
-            .child(
-                div()
-                    .h(px(150.))
-                    .bg(crate::ui::theme::color(crate::ui::theme::CARD))
-                    .border_1()
-                    .border_color(crate::ui::theme::color(crate::ui::theme::BORDER))
-                    .rounded_lg()
-                    .p_3()
-                    .child(send_input),
-            )
-            .child(
-                div().flex().items_center().justify_between().child(
-                    div()
-                        .flex()
-                        .gap_2()
-                        .child(encoding)
-                        .child(ending)
-                        .child(Input::new(&self.loop_interval_input).w(px(82.)))
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(crate::ui::theme::color(crate::ui::theme::MUTED))
-                                .child("ms"),
-                        )
-                        .child(
-                            Checkbox::new("auto")
-                                .label("自动滚动")
-                                .checked(self.state.auto_scroll)
-                                .on_click(cx.listener(|this, checked, _, cx| {
-                                    this.state.auto_scroll = *checked;
-                                    cx.notify();
-                                })),
-                        )
-                        .child(loop_button)
-                        .child(send),
-                ),
-            );
-        let presets = self
-            .state
-            .presets
-            .iter()
-            .enumerate()
-            .map(|(index, preset)| {
-                let item = preset.clone();
-                let content = item.content.clone();
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .p_2()
-                    .border_b_1()
-                    .border_color(crate::ui::theme::color(crate::ui::theme::BORDER))
-                    .child(
-                        div()
-                            .flex_1()
-                            .child(
-                                div()
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .child(item.name.clone()),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .font_family("monospace")
-                                    .text_color(crate::ui::theme::color(crate::ui::theme::MUTED))
-                                    .child(content.clone()),
-                            ),
-                    )
-                    .child(self.button(("preset-load", index), "载入", false).on_click(
-                        cx.listener(move |this, _, window, cx| {
-                            this.use_preset(content.clone(), window, cx)
-                        }),
-                    ))
-                    .child(
-                        self.button(("preset-send", index), "发送", true)
-                            .disabled(!connected)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.send_preset(item.clone(), cx)
-                            })),
-                    )
-                    .child(self.button(("preset-edit", index), "编辑", false).on_click(
-                        cx.listener(move |this, _, window, cx| {
-                            this.begin_edit(index, window, cx);
-                            cx.notify();
-                        }),
-                    ))
-                    .child(
-                        self.button(("preset-delete", index), "删除", false)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.delete_preset(index);
-                                cx.notify();
-                            })),
-                    )
-            });
-        let save_label = if self.editing_preset.is_some() {
-            "更新命令"
-        } else {
-            "保存命令"
-        };
-        let cancel_edit = self
-            .button("cancel-edit", "取消", false)
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.cancel_edit();
-                cx.notify();
-            }));
-        let manager_content = div()
-            .flex_1()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .child(
-                div()
-                    .text_lg()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("命令管理"),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .child(Input::new(&self.preset_name_input))
-                    .child(Input::new(&self.preset_content_input).flex_1())
-                    .child(
-                        self.button("add-preset", save_label, true)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.add_preset(cx);
-                                cx.notify();
-                            })),
-                    )
-                    .when(self.editing_preset.is_some(), |this| {
-                        this.child(cancel_edit)
-                    }),
-            )
-            .child(div().flex().flex_wrap().gap_2().children(presets));
-        let main_content = if tab == ActiveTab::ReceiveSend {
-            receive_content
-        } else {
-            manager_content
-        };
-        let sidebar = div().w(px(255.)).flex().flex_col().gap_3().child(
-            crate::ui::components::card()
-                .child(crate::ui::components::label("连接配置"))
-                .child(port_input)
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(crate::ui::theme::color(crate::ui::theme::MUTED))
-                        .child(format!("发现 {available_count} 个串口设备")),
-                )
-                .child(div().flex().flex_wrap().gap_2().children(port_buttons))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(crate::ui::components::label(format!(
-                            "波特率：{}",
-                            self.state.config.baud_rate
-                        )))
-                        .child(self.button("baud", "切换", false).on_click(cx.listener(
-                            |this, _, _, cx| {
-                                this.cycle_baud();
-                                cx.notify();
-                            },
-                        ))),
-                )
-                .child(div().flex().gap_2().child(data_bits).child(stop_bits))
-                .child(div().flex().gap_2().child(parity).child(flow))
-                .child(refresh_ports)
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(crate::ui::theme::color(crate::ui::theme::MUTED))
-                        .child("连接前可切换完整串口参数"),
-                )
-                .child(
-                    div()
-                        .mt_3()
-                        .text_xs()
-                        .text_color(crate::ui::theme::color(crate::ui::theme::MUTED))
-                        .child(format!(
-                            "接收 {} B · 发送 {} B",
-                            self.state.bytes_received, self.state.bytes_sent
-                        )),
-                ),
-        );
-        div()
-            .size_full()
-            .bg(crate::ui::theme::color(crate::ui::theme::BACKGROUND))
-            .text_color(crate::ui::theme::color(crate::ui::theme::TEXT))
-            .flex()
-            .flex_col()
-            .child(
-                div()
-                    .h(px(64.))
-                    .px_6()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .size(px(34.))
-                                    .rounded_lg()
-                                    .bg(crate::ui::theme::color(crate::ui::theme::PRIMARY))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_color(crate::ui::theme::color(crate::ui::theme::CARD))
-                                    .child("⌁"),
-                            )
-                            .child(
-                                div()
-                                    .child(
-                                        div()
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .child("Serial Debugger"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(crate::ui::theme::color(
-                                                crate::ui::theme::MUTED,
-                                            ))
-                                            .child("GPUI · 串口调试工作台"),
-                                    ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(div().size(px(8.)).rounded_full().bg(
-                                        crate::ui::theme::color(if connected {
-                                            crate::ui::theme::PRIMARY
-                                        } else {
-                                            crate::ui::theme::BORDER
-                                        }),
-                                    ))
-                                    .child(status),
-                            )
-                            .child(connect),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .p_5()
-                    .gap_4()
-                    .flex()
-                    .child(sidebar)
-                    .child(main_content),
-            )
-            .child(
-                div()
-                    .h(px(32.))
-                    .px_6()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .text_xs()
-                    .text_color(crate::ui::theme::color(crate::ui::theme::MUTED))
-                    .child(error.unwrap_or_else(|| "就绪 · 所有数据仅在本地处理".into()))
-                    .child(
-                        self.last_export
-                            .as_ref()
-                            .map(|path| format!("最近导出：{}", path.display()))
-                            .unwrap_or_default(),
-                    ),
-            )
+        self.pending_delete = None;
+        self.state.status = format!("已载入命令 · {name}");
     }
 }
