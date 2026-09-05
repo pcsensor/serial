@@ -1,0 +1,150 @@
+use crate::state::Encoding;
+
+pub fn encode(input: &str, encoding: &Encoding) -> Result<Vec<u8>, String> {
+    match encoding {
+        Encoding::Ascii => {
+            if input.bytes().any(|b| b > 0x7f) {
+                return Err("ASCII 只能包含 0-127 范围内的字符".into());
+            }
+            Ok(input.as_bytes().to_vec())
+        }
+        Encoding::Utf8 => Ok(input.as_bytes().to_vec()),
+        Encoding::Hex => parse_hex(input),
+        Encoding::Gbk => {
+            let (bytes, _, had_errors) = encoding_rs::GBK.encode(input);
+            if had_errors {
+                Err("GBK 编码失败：包含不支持的字符".into())
+            } else {
+                Ok(bytes.into_owned())
+            }
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub fn decode(data: &[u8], encoding: &Encoding) -> Result<String, String> {
+    match encoding {
+        Encoding::Ascii => {
+            if data.iter().any(|b| *b > 0x7f) {
+                return Err("收到非 ASCII 字节".into());
+            }
+            Ok(data.iter().map(|b| *b as char).collect())
+        }
+        Encoding::Utf8 => {
+            String::from_utf8(data.to_vec()).map_err(|e| format!("UTF-8 解码失败: {e}"))
+        }
+        Encoding::Hex => Ok(data
+            .iter()
+            .map(|b| format!("{b:02X}"))
+            .collect::<Vec<_>>()
+            .join(" ")),
+        Encoding::Gbk => {
+            let (text, _, had_errors) = encoding_rs::GBK.decode(data);
+            if had_errors {
+                Err("GBK 解码失败：无效的字节序列".into())
+            } else {
+                Ok(text.into_owned())
+            }
+        }
+    }
+}
+
+fn parse_hex(input: &str) -> Result<Vec<u8>, String> {
+    // Work on bytes rather than slicing a UTF-8 `str`; malformed/non-ASCII
+    // input must be reported as an error, never panic at a character boundary.
+    let cleaned: Vec<u8> = input
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect();
+    if !cleaned.len().is_multiple_of(2) {
+        return Err("HEX 字符串长度必须为偶数".into());
+    }
+    cleaned
+        .chunks_exact(2)
+        .map(|pair| {
+            let high = (pair[0] as char).to_digit(16);
+            let low = (pair[1] as char).to_digit(16);
+            match (high, low) {
+                (Some(high), Some(low)) => Ok(((high << 4) | low) as u8),
+                _ => Err(format!(
+                    "无效的 HEX 字符: {}",
+                    String::from_utf8_lossy(pair)
+                )),
+            }
+        })
+        .collect()
+}
+
+/// Incremental decoder used by the receive path. Incomplete UTF-8 tails are
+/// retained instead of being rendered as a spurious replacement/error.
+#[derive(Debug, Default)]
+#[allow(dead_code)]
+pub struct StreamDecoder {
+    pending: Vec<u8>,
+}
+
+#[allow(dead_code)]
+impl StreamDecoder {
+    pub fn clear(&mut self) {
+        self.pending.clear();
+    }
+    pub fn decode(&mut self, bytes: &[u8], encoding: &Encoding) -> Result<String, String> {
+        if !matches!(encoding, Encoding::Utf8) {
+            return decode(bytes, encoding);
+        }
+        self.pending.extend_from_slice(bytes);
+        match String::from_utf8(std::mem::take(&mut self.pending)) {
+            Ok(text) => Ok(text),
+            Err(error) => {
+                let utf8_error = error.utf8_error();
+                let valid = utf8_error.valid_up_to();
+                let bytes = error.into_bytes();
+                let mut text = String::from_utf8_lossy(&bytes[..valid]).into_owned();
+                match utf8_error.error_len() {
+                    Some(error_len) => {
+                        // Consume malformed bytes and continue decoding the
+                        // remainder; retaining them would poison every later
+                        // chunk and grow the pending buffer indefinitely.
+                        text.push('\u{FFFD}');
+                        text.push_str(&String::from_utf8_lossy(&bytes[valid + error_len..]));
+                    }
+                    None => self.pending.extend_from_slice(&bytes[valid..]),
+                }
+                Ok(text)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn ascii_rejects_non_ascii() {
+        assert!(encode("你好", &Encoding::Ascii).is_err());
+    }
+    #[test]
+    fn hex_roundtrip() {
+        let b = encode("48 65", &Encoding::Hex).unwrap();
+        assert_eq!(b, [0x48, 0x65]);
+        assert_eq!(decode(&b, &Encoding::Hex).unwrap(), "48 65");
+    }
+
+    #[test]
+    fn non_ascii_hex_input_returns_error_instead_of_panicking() {
+        assert!(encode("你1", &Encoding::Hex).is_err());
+    }
+    #[test]
+    fn utf8_tail_is_buffered() {
+        let mut d = StreamDecoder::default();
+        assert_eq!(d.decode(&[0xe4], &Encoding::Utf8).unwrap(), "");
+        assert_eq!(d.decode(&[0xbd, 0xa0], &Encoding::Utf8).unwrap(), "你");
+    }
+
+    #[test]
+    fn invalid_utf8_does_not_poison_following_chunks() {
+        let mut d = StreamDecoder::default();
+        assert_eq!(d.decode(&[0xff], &Encoding::Utf8).unwrap(), "�");
+        assert_eq!(d.decode(b"ok", &Encoding::Utf8).unwrap(), "ok");
+    }
+}
